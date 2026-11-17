@@ -6,15 +6,60 @@ export async function buildTestApp(overrides: Record<string, string> = {}) {
   return buildApp(loadEnv({ ...process.env, ...overrides }));
 }
 
-/** Empties every table so each test starts from a clean, known state. */
+/**
+ * Empties every table so each test starts from a clean, known state.
+ * It asks Postgres for the table list, so new tables are reset automatically.
+ */
 export async function resetDb(app: FastifyInstance) {
-  await app.prisma.$executeRawUnsafe('TRUNCATE TABLE refresh_tokens, users RESTART IDENTITY CASCADE');
+  const tables = await app.prisma.$queryRaw<{ tablename: string }[]>`
+    SELECT tablename FROM pg_tables
+    WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'`;
+  const list = tables.map((t) => `"${t.tablename}"`).join(', ');
+  await app.prisma.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
 }
 
-export const alice = { email: 'alice@example.com', password: 'correct horse battery', name: 'Alice' };
+export interface TestUser {
+  email: string;
+  password: string;
+  name: string;
+}
 
-export async function registerUser(app: FastifyInstance, user = alice) {
+export const alice: TestUser = {
+  email: 'alice@example.com',
+  password: 'correct horse battery',
+  name: 'Alice',
+};
+
+export function makeUser(name: string): TestUser {
+  return { email: `${name.toLowerCase()}@example.com`, password: 'correct horse battery', name };
+}
+
+export async function registerUser(app: FastifyInstance, user: TestUser = alice) {
   const res = await app.inject({ method: 'POST', url: '/auth/register', payload: user });
   if (res.statusCode !== 201) throw new Error(`register failed: ${res.body}`);
-  return res.json() as { accessToken: string; refreshToken: string; user: { id: string } };
+  return res.json<{ accessToken: string; refreshToken: string; user: { id: string } }>();
+}
+
+/** A tiny HTTP client bound to one user's access token. */
+export function client(app: FastifyInstance, accessToken?: string) {
+  const headers = accessToken === undefined ? {} : { authorization: `Bearer ${accessToken}` };
+  const send = (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, payload?: object) =>
+    payload === undefined
+      ? app.inject({ method, url, headers })
+      : app.inject({ method, url, headers, payload });
+  return {
+    get: (url: string) => send('GET', url),
+    post: (url: string, payload?: object) => send('POST', url, payload),
+    patch: (url: string, payload?: object) => send('PATCH', url, payload),
+    delete: (url: string) => send('DELETE', url),
+  };
+}
+
+export type Client = ReturnType<typeof client>;
+
+/** Registers a user and returns their id, email and a client logged in as them. */
+export async function signUp(app: FastifyInstance, name: string) {
+  const user = makeUser(name);
+  const { accessToken, user: created } = await registerUser(app, user);
+  return { id: created.id, email: user.email, api: client(app, accessToken) };
 }

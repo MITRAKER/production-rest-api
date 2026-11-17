@@ -7,8 +7,9 @@ import { z } from 'zod';
  * never leak by accident). TypeScript types are inferred from them too.
  */
 
-// Trim and lowercase first, then check it's an email.
-const Email = z.string().trim().toLowerCase().pipe(z.email().max(254));
+// Bound the raw input (Power of Ten rule 3), trim and lowercase it,
+// then check it's an email no longer than the 254 characters email allows.
+export const Email = z.string().max(320).trim().toLowerCase().pipe(z.email().max(254));
 
 // Upper bound matters: hashing a 1 MB "password" is a cheap way to burn our CPU.
 const Password = z.string().min(8, 'must be at least 8 characters').max(128);

@@ -10,10 +10,10 @@ const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
-  LOG_LEVEL: z
-    .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
-    .default('info'),
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+  // Maximum number of open database connections (Power of Ten rule 3).
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
 
   // Auth. The secret signs access tokens: anyone who has it can forge logins,
   // so it must be long, random and never committed for production.

@@ -16,8 +16,7 @@ export class AppError extends Error {
 }
 
 export const Errors = {
-  unauthorized: (message = 'Authentication required') =>
-    new AppError(401, 'UNAUTHORIZED', message),
+  unauthorized: (message = 'Authentication required') => new AppError(401, 'UNAUTHORIZED', message),
   invalidCredentials: () => new AppError(401, 'INVALID_CREDENTIALS', 'Invalid email or password'),
   invalidRefreshToken: () =>
     new AppError(401, 'INVALID_REFRESH_TOKEN', 'Refresh token is invalid or expired'),

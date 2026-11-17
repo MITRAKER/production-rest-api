@@ -1,4 +1,4 @@
-import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
+import type { FastifyPluginCallbackZod } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 import { AuthService } from './auth.service.js';
 import {
@@ -13,12 +13,15 @@ import {
  * Routes are thin: validate input (via schema), call the service, shape the
  * response. Business rules live in AuthService so they can be reused and
  * tested without HTTP.
+ *
+ * Registering routes does no async work, so this plugin uses Fastify's
+ * callback form and calls done() when it's finished.
  */
-const authRoutes: FastifyPluginAsyncZod<{
+const authRoutes: FastifyPluginCallbackZod<{
   accessTtl: string;
   refreshTtlDays: number;
   rateLimitMax: number;
-}> = async (app, opts) => {
+}> = (app, opts, done) => {
   const auth = new AuthService(app, opts);
 
   // Stricter limit on endpoints attackers would hammer to guess passwords.
@@ -62,6 +65,8 @@ const authRoutes: FastifyPluginAsyncZod<{
       return reply.code(204).send(null);
     },
   );
+
+  done();
 };
 
 export default authRoutes;

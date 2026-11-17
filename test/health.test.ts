@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { loadEnv } from '../src/config/env.js';
@@ -24,6 +24,16 @@ describe('health endpoints', () => {
     const res = await app.inject({ method: 'GET', url: '/health/ready' });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ status: 'ok', database: 'up' });
+  });
+
+  it('GET /health/ready answers 503 when the database is unreachable', async () => {
+    const spy = vi
+      .spyOn(app.prisma, '$queryRaw')
+      .mockRejectedValueOnce(new Error('connection refused'));
+    const res = await app.inject({ method: 'GET', url: '/health/ready' });
+    spy.mockRestore();
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ status: 'error', database: 'down' });
   });
 
   it('returns a request id header for tracing', async () => {

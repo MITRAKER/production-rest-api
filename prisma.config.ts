@@ -6,5 +6,5 @@ export default defineConfig({
   migrations: { path: 'prisma/migrations' },
   // Read directly (not with env()) so `prisma generate` also works in a
   // Docker build, where no database exists yet. Migrations still need it set.
-  datasource: { url: process.env.DATABASE_URL ?? '' },
+  datasource: { url: process.env['DATABASE_URL'] ?? '' },
 });
