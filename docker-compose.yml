@@ -1,5 +1,5 @@
 # `docker compose up -d db` starts only Postgres for local development.
-# `docker compose up --build` starts Postgres and the API together.
+# `docker compose up --build` starts Postgres, runs migrations, then starts the API.
 services:
   db:
     image: postgres:16-alpine
@@ -18,15 +18,29 @@ services:
       timeout: 3s
       retries: 10
 
-  api:
-    build: .
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DATABASE_URL: postgresql://api:api@db:5432/api_dev
     depends_on:
       db:
         condition: service_healthy
+
+  api:
+    build:
+      context: .
+      target: runtime
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       PORT: 3000
       LOG_LEVEL: info
       DATABASE_URL: postgresql://api:api@db:5432/api_dev
+      # Local demo only. In production this comes from a secrets manager.
+      JWT_ACCESS_SECRET: compose-demo-secret-compose-demo-secret-1234
     ports:
       - '3000:3000'
 

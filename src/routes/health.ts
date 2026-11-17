@@ -1,4 +1,5 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
+import { z } from 'zod';
 
 /**
  * Two health endpoints, the way orchestrators like Kubernetes expect:
@@ -9,49 +10,21 @@ import type { FastifyPluginAsync } from 'fastify';
  * Keeping them separate means a slow database makes the app "not ready"
  * (so traffic is routed elsewhere) without getting it killed and restarted.
  */
-const healthRoutes: FastifyPluginAsync = async (app) => {
-  app.get(
-    '/live',
-    {
-      schema: {
-        response: {
-          200: {
-            type: 'object',
-            properties: { status: { type: 'string' } },
-            required: ['status'],
-          },
-        },
-      },
-    },
-    async () => ({ status: 'ok' }),
-  );
+const Live = z.object({ status: z.literal('ok') });
+const Ready = z.object({ status: z.enum(['ok', 'error']), database: z.enum(['up', 'down']) });
 
-  app.get(
-    '/ready',
-    {
-      schema: {
-        response: {
-          200: {
-            type: 'object',
-            properties: { status: { type: 'string' }, database: { type: 'string' } },
-          },
-          503: {
-            type: 'object',
-            properties: { status: { type: 'string' }, database: { type: 'string' } },
-          },
-        },
-      },
-    },
-    async (request, reply) => {
-      try {
-        await app.prisma.$queryRaw`SELECT 1`;
-        return { status: 'ok', database: 'up' };
-      } catch (err) {
-        request.log.error({ err }, 'readiness check failed: database unreachable');
-        return reply.code(503).send({ status: 'error', database: 'down' });
-      }
-    },
-  );
+const healthRoutes: FastifyPluginAsyncZod = async (app) => {
+  app.get('/live', { schema: { response: { 200: Live } } }, async () => ({ status: 'ok' as const }));
+
+  app.get('/ready', { schema: { response: { 200: Ready, 503: Ready } } }, async (request, reply) => {
+    try {
+      await app.prisma.$queryRaw`SELECT 1`;
+      return { status: 'ok' as const, database: 'up' as const };
+    } catch (err) {
+      request.log.error({ err }, 'readiness check failed: database unreachable');
+      return reply.code(503).send({ status: 'error', database: 'down' });
+    }
+  });
 };
 
 export default healthRoutes;
