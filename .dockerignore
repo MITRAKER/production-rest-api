@@ -1,6 +1,11 @@
+# Keep the build context small and free of secrets and local artifacts.
 node_modules
 dist
 coverage
-.env
-.git
 src/generated
+.git
+.github
+.husky
+.env
+.env.*
+*.log
