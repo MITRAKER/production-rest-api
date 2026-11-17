@@ -7,7 +7,7 @@ can rebuild it yourself without looking.
 | Chapter | Step | Status |
 | ------- | ---- | ------ |
 | 1 | Project skeleton, Postgres, health checks, tests, Docker, CI | ✅ |
-| 2 | Authentication: register, login, refresh tokens, logout | ⏳ |
+| 2 | Authentication: register, login, refresh tokens, logout | ✅ |
 | 3 | Workspaces, members and role-based permissions | ⏳ |
 | 4 | Projects and tasks: pagination, filtering, sorting | ⏳ |
 | 5 | Error format, logging, OpenAPI docs | ⏳ |
@@ -220,3 +220,214 @@ Try recreating this chapter from an empty folder, peeking only when stuck:
 REST · endpoint · status code (200, 404, 503) · environment variable · ORM ·
 connection pool · plugin · decorator · liveness/readiness probe · structured logging ·
 request id · integration test · graceful shutdown · SIGTERM · multi-stage build · CI
+
+---
+
+## Chapter 2: Authentication
+
+### What we built
+
+```
+POST /auth/register  {email, password, name}  -> 201 {user, accessToken, refreshToken}
+POST /auth/login     {email, password}        -> 200 {user, accessToken, refreshToken}
+POST /auth/refresh   {refreshToken}           -> 200 {accessToken, refreshToken}   (new pair)
+POST /auth/logout    {refreshToken}           -> 204
+GET  /users/me       Authorization: Bearer …  -> 200 {id, email, name, createdAt}
+```
+
+Plus: a `users` and `refresh_tokens` table (our first migration), one consistent error
+format, input validation with Zod, rate limiting on login, and 18 new tests.
+
+### New files
+
+```
+prisma/migrations/…_auth/migration.sql  # the SQL Prisma generated for our tables
+src/lib/errors.ts                       # AppError: status + stable code + message
+src/plugins/error-handler.ts            # turns every error into the same JSON shape
+src/plugins/auth.ts                     # JWT setup + app.authenticate guard
+src/modules/auth/auth.schemas.ts        # Zod schemas for requests and responses
+src/modules/auth/auth.service.ts        # the business logic (hashing, tokens, rotation)
+src/modules/auth/auth.routes.ts         # thin HTTP layer that calls the service
+src/modules/users/users.routes.ts       # GET /users/me
+test/global-setup.ts, test/helpers.ts   # migrate test DB, reset tables, shared helpers
+test/auth.test.ts                       # 18 tests
+```
+
+**Why "modules"?** As the API grows, grouping by feature (`auth/`, `users/`, later
+`workspaces/`, `tasks/`) scales better than grouping by type (`all-routes/`,
+`all-services/`). Everything about auth lives in one folder.
+
+**Why routes + service?** Routes deal with HTTP (status codes, headers). The service deals
+with rules (how to hash, when a token is valid). Keeping them apart means you could call
+`AuthService` from a CLI script or a background job without faking HTTP.
+
+### Concept 1: Migrations
+
+You never edit a production database by hand. Instead:
+
+1. change `prisma/schema.prisma` (we added `User` and `RefreshToken`),
+2. run `npm run db:migrate -- --name auth`,
+3. Prisma compares the schema with the DB and writes a SQL file in `prisma/migrations/`.
+
+That SQL file is committed. Every environment (your laptop, CI, production) runs the
+same files in the same order (`prisma migrate deploy`), so they all end up identical.
+Open `migration.sql` and read it: it's plain SQL, and you should always review it.
+
+Notice `@map("password_hash")` and `@@map("users")`: TypeScript uses `camelCase`, SQL
+conventionally uses `snake_case` table and column names. Mapping gives you both.
+
+### Concept 2: Never store passwords, store slow hashes
+
+A hash is a one-way function: easy to compute from the password, practically impossible
+to reverse. At login we hash what the user typed and compare.
+
+But regular hashes (SHA-256) are *fast*, and a GPU can try billions per second against a
+leaked database. **argon2id** is designed to be slow and use lots of memory, which kills
+that attack. It also adds a random **salt** per user, so two people with the same password
+get different hashes. The salt is stored inside the hash string (`$argon2id$v=19$m=…`).
+
+Also notice the password has a **max** length (128). Without it, someone could send a 10 MB
+password and make the server spend seconds hashing it.
+
+### Concept 3: Don't leak which emails exist
+
+Login returns the exact same `401 INVALID_CREDENTIALS` for "no such email" and "wrong
+password". If the messages differed, attackers could build a list of real accounts.
+
+Subtler: if unknown emails returned instantly but real ones took 100 ms (argon2 is slow),
+the *timing* would leak the same thing. So for unknown emails we still run
+`argon2.verify` against a dummy hash. Look for `getDummyHash` in `auth.service.ts`.
+
+### Concept 4: Access tokens (JWT)
+
+After login the client gets an **access token**, a JWT, and sends it on every request:
+`Authorization: Bearer eyJhbGci…`.
+
+A JWT is three base64 parts: `header.payload.signature`. The payload is just
+`{"sub":"<user id>","iat":…,"exp":…}`. **It is readable by anyone** (paste one into
+jwt.io), so never put secrets in it. What makes it trustworthy is the **signature**:
+an HMAC of header + payload using `JWT_ACCESS_SECRET`. Change one character of the payload
+and the signature no longer matches (the "rejects a tampered token" test proves it).
+
+Why JWTs? The server can verify them with no database lookup, which is fast and scales.
+The downside: you can't "cancel" one before it expires. So we keep them **short-lived
+(15 minutes)**.
+
+We also pin the algorithm (`algorithms: ['HS256']`). Some old JWT libraries trusted the
+`alg` field in the token itself, letting attackers pick `none`. Pinning prevents that.
+
+### Concept 5: Refresh tokens and rotation
+
+15-minute logins would be annoying, so login also returns a **refresh token**: a long
+random string (32 bytes) valid for 30 days, used only to get new access tokens.
+
+- It's **random, not a JWT**, and stored in the DB, so we *can* revoke it.
+- We store only its **SHA-256 hash**. If the database leaks, the tokens can't be used.
+  (Fast SHA-256 is fine here, unlike passwords: the token is 256 random bits, there's
+  nothing to guess.)
+- **Rotation:** each `/auth/refresh` revokes the old refresh token and issues a new one.
+- **Reuse detection:** all tokens from one login share a `familyId`. If a *revoked* token
+  is presented again, either the user or a thief is using a stale copy. We can't tell
+  which, so we revoke the whole family and both must log in again. This is the approach
+  recommended by the OAuth 2.0 security best practices.
+- **Race safety:** we revoke with `updateMany({ where: { id, revokedAt: null } })` and check
+  that it changed 1 row. If two requests refresh the same token at the same instant, only
+  one wins.
+
+> **Where should clients keep tokens?** For browser apps, an `HttpOnly`, `Secure`,
+> `SameSite` cookie is safest for the refresh token because JavaScript can't read it.
+> We return tokens in JSON because it keeps this API usable from mobile apps, scripts and
+> tests. Moving the refresh token to a cookie is Exercise 4.
+
+### Concept 6: Validation with Zod + type providers
+
+`fastify-type-provider-zod` lets routes use Zod schemas directly:
+
+```ts
+app.post('/register', { schema: { body: RegisterBody, response: { 201: AuthResponse } } }, …)
+```
+
+That one line gives us three things:
+
+1. **Validation:** bad input is rejected with 400 before our handler runs.
+2. **Types:** `request.body` is automatically typed as `{ email: string; … }`.
+3. **Safe output:** the response is serialized through `AuthResponse`, so fields not in
+   the schema (like `passwordHash`) are dropped. Defense in depth: even if we accidentally
+   return the whole DB row, the hash never leaves the server.
+
+Schemas can also *transform*: `Email` trims and lowercases, so `" Alice@X.com "` and
+`"alice@x.com"` are the same account.
+
+### Concept 7: One error format
+
+Every error now looks like:
+
+```json
+{ "error": { "code": "VALIDATION_ERROR", "message": "Request validation failed",
+             "details": [{ "path": "/email", "message": "Invalid email address" }] } }
+```
+
+- `code` is stable and machine-readable. Frontends switch on it.
+- `message` is for humans and can change.
+- Unknown errors become a generic 500. The full error goes to the logs, never to the client
+  (stack traces and SQL help attackers).
+
+We also tell the logger to **redact** the `Authorization` header so tokens never end up in
+log files.
+
+### Concept 8: Uniqueness belongs to the database
+
+To reject duplicate emails we *don't* do "check if exists, then insert". Two signups at the
+same moment could both pass the check. Instead the DB has a `UNIQUE` index on `email`, we
+just insert, and turn Prisma's `P2002` error into `409 EMAIL_TAKEN`. Let the database
+enforce invariants; it's the only component that sees every write.
+
+### Concept 9: Rate limiting
+
+`@fastify/rate-limit` allows `AUTH_RATE_LIMIT_MAX` (default 10) login/register/refresh
+attempts per IP per minute, then returns `429 RATE_LIMITED`. That turns "try a million
+passwords" into "try 10 a minute". It's off globally (`global: false`) and enabled per
+route via `config.rateLimit`.
+
+### Concept 10: Testing auth properly
+
+Tests now run against migrated tables, and `resetDb()` truncates them before each test so
+tests can't affect each other. `fileParallelism: false` stops two test files from fighting
+over the same database.
+
+Look at *what* we test: not just the happy path, but the attacks. Tampered token, expired
+token, reused refresh token, duplicate email in different case, timing-safe error messages,
+brute force. Security code is mostly about the unhappy paths.
+
+### Build it yourself
+
+1. Add the `User` model, run a migration, read the generated SQL.
+2. Write `POST /auth/register` that hashes with argon2 and returns the user (no tokens yet).
+   Write a test proving the hash isn't the password.
+3. Add `@fastify/jwt`, return an access token, and add `GET /users/me` guarded by
+   `app.authenticate`. Test with and without the token.
+4. Add `POST /auth/login` with the dummy-hash trick.
+5. Add the `RefreshToken` model, then `/auth/refresh` with rotation. Write the reuse test
+   *first*, watch it fail, then implement family revocation.
+6. Add the error handler and rate limiting.
+
+### Exercises
+
+1. **Read a JWT.** Register with curl, copy the `accessToken`, and decode the middle part:
+   `echo '<payload>' | base64 -d`. What fields do you see? Why is it fine that it's readable?
+2. **Change password.** Add `POST /users/me/password` taking `currentPassword` and
+   `newPassword`. It should verify the current one, update the hash, and revoke **all** the
+   user's refresh tokens. Write tests.
+3. **Logout everywhere.** Add `POST /auth/logout-all` (authenticated) that revokes every
+   refresh token for the user.
+4. **Cookies.** Make `/auth/login` also set the refresh token as an
+   `HttpOnly; Secure; SameSite=Strict` cookie using `@fastify/cookie`, and let
+   `/auth/refresh` read it from there.
+5. **Think about it.** Why do we hash refresh tokens with SHA-256 but passwords with
+   argon2? What would go wrong if we swapped them?
+
+### Words to know
+
+migration · hash · salt · argon2id · JWT · signature · HMAC · claims (`sub`, `exp`) ·
+access token · refresh token · token rotation · reuse detection · user enumeration ·
+timing attack · rate limiting · 401 vs 403 vs 409 vs 429 · idempotent · defense in depth

@@ -1,5 +1,5 @@
 // Prisma schema: the single source of truth for our database tables.
-// Step 1 has no tables yet. Step 2 adds User and RefreshToken.
+// Change this file, then run `npm run db:migrate -- --name what_changed`.
 
 generator client {
   provider = "prisma-client"
@@ -8,4 +8,38 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  // Stored lowercased by the app so "Ann@x.com" and "ann@x.com" are one account.
+  email        String   @unique
+  name         String
+  // Never the password itself: an argon2id hash that includes its own salt.
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  // SHA-256 of the token. If the database leaks, the tokens are still useless.
+  tokenHash String    @unique @map("token_hash")
+  // Every token created by rotating from the same login shares a family.
+  // If an old token in a family is reused, the whole family is revoked.
+  familyId  String    @map("family_id") @db.Uuid
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
 }
