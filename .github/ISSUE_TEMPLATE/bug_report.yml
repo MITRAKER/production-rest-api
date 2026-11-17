@@ -1,0 +1,44 @@
+name: Bug report
+description: Something doesn't work as documented.
+title: 'bug: '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+        **Found a security problem?** Don't open an issue: follow [SECURITY.md](https://github.com/MITRAKER/production-rest-api/blob/main/SECURITY.md) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: The request you sent (method, path, body) and the response you got. Remove tokens and passwords.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. docker compose up -d db && npm run dev
+        2. curl -X POST http://localhost:3000/auth/register -H 'content-type: application/json' -d '...'
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v1.0.0, or a commit SHA from main
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log lines from the API, with secrets removed.
+      render: shell
