@@ -10,6 +10,13 @@ import { Errors } from './errors.js';
  * session revocation take it, so a logout can't miss the new token that a
  * refresh is creating at the same moment.
  *
+ * It is also taken before counting a user's workspaces (quotas).
+ *
+ * Lock order: a transaction that locks a workspace (lockWorkspace) and a
+ * user locks the workspace FIRST, never the other way round. Otherwise two
+ * transactions could each hold one lock and wait forever for the other's
+ * (a deadlock).
+ *
  * Prisma has no API for row locks, so this is one of the rare raw SQL
  * queries. It is parameterized like every other query: `${userId}` becomes
  * a bind parameter, never part of the SQL text.

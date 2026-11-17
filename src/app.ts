@@ -9,6 +9,9 @@ import authPlugin from './plugins/auth.js';
 import healthRoutes from './routes/health.js';
 import authRoutes from './modules/auth/auth.routes.js';
 import usersRoutes from './modules/users/users.routes.js';
+import workspacesRoutes from './modules/workspaces/workspaces.routes.js';
+import membersRoutes from './modules/workspaces/members.routes.js';
+import invitationsRoutes from './modules/invitations/invitations.routes.js';
 
 /** Pretty, colored logs for humans in development; JSON lines everywhere else. */
 export function loggerOptions(env: Pick<Env, 'NODE_ENV' | 'LOG_LEVEL'>) {
@@ -64,6 +67,20 @@ export async function buildApp(env: Env): Promise<FastifyInstance> {
     rateLimitMax: env.AUTH_RATE_LIMIT_MAX,
   });
   await app.register(usersRoutes, { prefix: '/users' });
+  await app.register(workspacesRoutes, {
+    prefix: '/workspaces',
+    maxWorkspacesPerUser: env.MAX_WORKSPACES_PER_USER,
+  });
+  await app.register(membersRoutes, {
+    prefix: '/workspaces',
+    maxMembersPerWorkspace: env.MAX_MEMBERS_PER_WORKSPACE,
+  });
+  await app.register(invitationsRoutes, {
+    ttlDays: env.INVITATION_TTL_DAYS,
+    maxPendingInvitations: env.MAX_PENDING_INVITATIONS,
+    maxMembersPerWorkspace: env.MAX_MEMBERS_PER_WORKSPACE,
+    maxWorkspacesPerUser: env.MAX_WORKSPACES_PER_USER,
+  });
 
   return app;
 }

@@ -9,7 +9,7 @@ can rebuild it yourself without looking.
 | 1       | Project skeleton, Postgres, health checks, tests, Docker, CI        | ✅     |
 | 2       | Authentication: register, login, refresh tokens, logout             | ✅     |
 | 3       | Professional quality: CI/CD, security scanning, NASA/JPL code rules | ✅     |
-| 4       | Workspaces, members and role-based permissions                      | ⏳     |
+| 4       | Workspaces, members, invitations and role-based permissions         | ✅     |
 | 5       | Projects and tasks: pagination, filtering, sorting                  | ⏳     |
 | 6       | Error format, logging, OpenAPI docs                                 | ⏳     |
 | 7       | Seed data and a recruiter-ready README                              | ⏳     |
@@ -1008,3 +1008,327 @@ bounded resource · Git hook · Conventional Commits · CI/CD · workflow · job
 service container · least privilege · SHA pinning · script injection · supply chain ·
 lockfile · CVE · dependency review · CodeQL · Trivy · LTS · image digest · smoke test ·
 Semantic Versioning · changelog · provenance · SBOM
+
+---
+
+## Chapter 4: Workspaces, members and permissions
+
+### What we built
+
+Teams can now share a private space. A **workspace** has members, and each member has one
+role: `OWNER`, `ADMIN` or `MEMBER`.
+
+```
+POST   /workspaces                                    create (you become OWNER)
+GET    /workspaces                                    the workspaces you're in, with your role
+GET    /workspaces/:workspaceId                       read one
+PATCH  /workspaces/:workspaceId                       rename           (ADMIN+)
+DELETE /workspaces/:workspaceId                       delete           (OWNER)
+
+GET    /workspaces/:workspaceId/members               list members
+PATCH  /workspaces/:workspaceId/members/:userId       change a role    (OWNER)
+DELETE /workspaces/:workspaceId/members/:userId       remove someone, or yourself (= leave)
+
+POST   /workspaces/:workspaceId/invitations           invite by email  (ADMIN+), returns a token once
+GET    /workspaces/:workspaceId/invitations           pending invitations (ADMIN+)
+DELETE /workspaces/:workspaceId/invitations/:id       revoke           (ADMIN+)
+POST   /invitations/accept                            join with a token
+```
+
+Step 5's projects and tasks will live _inside_ workspaces, so this chapter is the security
+foundation for everything after it.
+
+### New files
+
+```
+prisma/migrations/…_workspaces/migration.sql
+src/modules/workspaces/workspaces.policy.ts    # THE permission rules, in one file
+src/modules/workspaces/workspaces.access.ts    # membership checks + the row lock
+src/modules/workspaces/workspaces.service.ts   # workspaces logic
+src/modules/workspaces/workspaces.routes.ts
+src/modules/workspaces/members.service.ts      # members logic: roles, removal, leaving
+src/modules/workspaces/members.routes.ts
+src/modules/invitations/…                      # invitations: schemas, service, routes
+test/workspaces.policy.test.ts                 # unit tests of the rules (no DB)
+test/workspaces.test.ts, test/invitations.test.ts
+test/limits.test.ts                            # the quotas, including under concurrency
+```
+
+### Concept 1: Authentication vs authorization
+
+- **Authentication** (chapter 2): _who are you?_ Fails with **401 Unauthorized**.
+- **Authorization** (this chapter): _are you allowed to do this?_ Fails with **403 Forbidden**.
+
+Most serious API security bugs are authorization bugs: the user is logged in correctly, but
+the code forgets to check that _this_ user may touch _this_ record.
+
+### Concept 2: Multi-tenancy and the membership table
+
+A **tenant** is a customer's private slice of a shared system (here: a workspace). The
+golden rule of multi-tenant apps: **every query is scoped to a tenant the caller belongs to**.
+
+Users and workspaces are many-to-many (a user can be in many workspaces, a workspace has
+many users). In SQL that's a **join table**, and ours carries extra data, the role:
+
+```
+memberships (workspace_id, user_id, role, created_at)
+             └──── primary key ────┘
+```
+
+The **composite primary key** `(workspace_id, user_id)` means the database itself makes it
+impossible to be a member twice.
+
+Notice `onDelete` choices in `schema.prisma`:
+
+- deleting a workspace **cascades** to its memberships and invitations,
+- deleting a user is **restricted** while they're still in a workspace. If we ever add
+  "delete my account", the database forces us to handle ownership first, so a team can
+  never be silently left without an owner.
+
+### Concept 3: Role-based access control (RBAC), in one file
+
+Open `workspaces.policy.ts`. The entire permission model is a small table:
+
+| Action                                               | Minimum role |
+| ---------------------------------------------------- | ------------ |
+| read workspace, list members                         | MEMBER       |
+| rename workspace, remove members, manage invitations | ADMIN        |
+| change roles, delete workspace                       | OWNER        |
+
+plus one more rule, `outranks(actor, target)`: **you can only act on people (or invitations)
+with a lower role than yours.** So an admin can remove a member but not another admin or an
+owner, and can invite members but not admins.
+
+Why put this in one file instead of `if (role === 'ADMIN')` checks in each route?
+
+- You can read the whole security model in one screen.
+- Changing a rule is a one-line change.
+- It's **pure** (no DB, no HTTP), so `workspaces.policy.test.ts` tests every
+  role/action combination in milliseconds. That test file _is_ the spec.
+
+### Concept 4: 404 for outsiders, 403 for members
+
+If Dave (not a member) asks for Acme's workspace, he gets **404 Not Found**, exactly the same
+response as for an id that doesn't exist (a test compares the two bodies). If Carol (a
+member) tries to rename it, she gets **403 Forbidden**.
+
+Why the difference? Carol already knows the workspace exists, so 403 tells her nothing new.
+For Dave, a 403 would confirm "yes, something lives at this id", which leaks information.
+GitHub does the same: private repos you can't see are 404, not 403.
+
+### Concept 5: IDOR, the most common API vulnerability
+
+**IDOR** (Insecure Direct Object Reference): the code fetches a record by the id in the URL
+without checking it belongs to the caller. It's #1 on the OWASP API Security Top 10 (called
+"Broken Object Level Authorization" there).
+
+Look at `revoke()` in `invitations.service.ts`:
+
+```ts
+await prisma.invitation.findFirst({ where: { id: invitationId, workspaceId, … } });
+```
+
+If it used only `id: invitationId`, Dave could create his own workspace (where he's owner, so
+he passes the permission check) and then call
+`DELETE /workspaces/<his workspace>/invitations/<Acme's invitation id>`. The permission check
+would be for _his_ workspace, but the delete would hit _Acme's_ invitation. Scoping the
+query by both ids closes that hole; the "IDOR" test in `invitations.test.ts` proves it.
+
+**Habit to build:** whenever a URL contains a parent id and a child id, the query must
+include both.
+
+### Concept 6: Invariants and race conditions
+
+An **invariant** is something that must _always_ be true. Ours: _every workspace has at
+least one owner_. The obvious code is:
+
+```
+count owners → if more than 1, allow the owner to leave → delete membership
+```
+
+Now imagine Alice and Bob, the only two owners, both click "Leave" at the same instant:
+
+```
+Alice's request: count owners = 2 ✓ ......... delete Alice
+Bob's request:   count owners = 2 ✓ ......... delete Bob        → zero owners!
+```
+
+Each check was true when it ran, but by the time each acted, the world had changed. This
+bug class is called **TOCTOU** (time-of-check to time-of-use), and it's real: the test
+"keeps one owner even when two owners leave at the same instant" fails reliably if you
+remove the fix.
+
+**The fix: a transaction plus a row lock.** Every operation that changes membership runs
+inside `prisma.$transaction(...)` and first does:
+
+```sql
+SELECT id FROM workspaces WHERE id = $1 FOR UPDATE
+```
+
+`FOR UPDATE` locks that workspace row until the transaction ends. A second request for the
+same workspace waits at that line until the first one commits. So the operations happen one
+at a time per workspace (other workspaces aren't affected), and the second one counts
+owners _after_ the first has finished.
+
+Two details matter:
+
+1. **Lock first, then read.** We re-read the caller's own role _after_ taking the lock.
+   In the "two owners demote each other" test, the second request discovers its caller was
+   just demoted and gets 403.
+2. We lock the **parent** (workspace) row, not the membership rows, because "how many
+   owners are there?" is a question about a _set_ of rows, including rows that might be
+   inserted. Locking one parent row is the simplest way to serialize changes to that set.
+
+We only lock where an invariant is at stake. Renaming a workspace doesn't need it.
+
+### Concept 7: Invitations
+
+Inviting is the most security-sensitive feature here, so it combines several earlier ideas:
+
+- **Secret token, stored hashed.** Like refresh tokens (chapter 2): 32 random bytes, only
+  the SHA-256 hash is saved. Code is shared in `src/lib/tokens.ts`.
+- **Shown once.** The token appears only in the response to the inviter (like an API key).
+  A real product would email a link; we return it so the inviter can share it.
+- **Bound to an email.** Accepting needs the token _and_ being logged in with the invited
+  email. A leaked link is useless to anyone else, and a mismatch doesn't burn the
+  invitation (the "different account" test).
+- **Expires** after `INVITATION_TTL_DAYS` (7), and **single-use**, enforced with the same
+  conditional-update trick as refresh token rotation, so two simultaneous accepts can't
+  both succeed.
+- **OWNER can't be invited.** That's a rule about the input's _shape_, so the Zod schema
+  rejects it with 400. Ownership only comes from an existing owner promoting a member.
+- **One pending invitation per email.** Revoke the old one before sending a new one.
+
+> **A known gap, on purpose:** we don't verify email addresses at sign-up. Someone could
+> register as `erin@example.com` without owning that inbox. Together with the token they'd
+> still need, this is a low risk here, but a real product would verify emails first
+> (Exercise 4).
+
+### Concept 8: Atomic nested writes
+
+Creating a workspace also creates the creator's OWNER membership:
+
+```ts
+prisma.workspace.create({
+  data: { name, memberships: { create: { userId, role: 'OWNER' } } },
+});
+```
+
+Prisma runs nested writes in one transaction, so there's never a moment where the workspace
+exists without an owner, even if the server crashes halfway.
+
+### Concept 9: Validate path parameters too
+
+`/workspaces/not-a-uuid` would make Postgres throw "invalid input syntax for type uuid",
+which our error handler would turn into a 500. Declaring `params: z.object({ workspaceId:
+z.uuid() })` turns it into a clean 400 before any query runs. **Everything** the client
+sends is input: body, query string, headers, _and_ the URL path.
+
+### Concept 10: List responses use an envelope
+
+`GET /workspaces` returns `{ "data": [ … ] }`, not a bare array. In step 5 we'll add
+pagination (`{ "data": [...], "nextCursor": "…" }`). With an envelope that's a new field;
+with a bare array it would be a breaking change for every client.
+
+### Concept 11: Testing authorization
+
+Authorization bugs hide in the combinations, so the tests are organized around a cast:
+`createTeam()` builds **Alice (OWNER), Bob (ADMIN), Carol (MEMBER)** in workspace Acme,
+plus **Dave**, who isn't a member. Bob and Carol join through the real invitation flow.
+
+For each endpoint we check the allowed role succeeds, the next role down gets **403**, and
+Dave gets **404**. Then we test the invariants (last owner, IDOR, simultaneous requests).
+
+### Concept 12: The Power of Ten rules in this chapter
+
+This is the first feature built under the rules from chapter 3, and they shaped it:
+
+**Rule 3: quotas.** Without limits, one script could create a million workspaces or
+invitations, and `GET /workspaces` would try to return all of them in one response. So:
+
+| Quota                              | Default | Setting                     |
+| ---------------------------------- | ------- | --------------------------- |
+| Workspaces a user can belong to    | 50      | `MAX_WORKSPACES_PER_USER`   |
+| Members in a workspace             | 200     | `MAX_MEMBERS_PER_WORKSPACE` |
+| Pending invitations in a workspace | 50      | `MAX_PENDING_INVITATIONS`   |
+
+Going over a quota returns `409 LIMIT_REACHED`. Each setting is itself capped at
+`LIMITS.listMax` (1,000), and every list query has a `take:` with the quota, so no list the
+API returns can ever be unbounded. Step 5 adds pagination for lists that need to be longer.
+
+**A quota check is a race, too.** It's the same time-of-check to time-of-use problem as the
+last owner: two "create workspace" requests could both count 49 workspaces, and both insert.
+So `create()` locks the user's row before counting, and accepting an invitation locks the
+workspace and then the user. Always in that order: if one transaction locked A then B while
+another locked B then A, each would wait for the other forever (a **deadlock**). Postgres
+detects deadlocks and aborts one of the transactions, but a fixed lock order means they
+can't happen at all. Two tests fire simultaneous requests at the last free slot and check
+that exactly one wins.
+
+Race tests have a trap, and we fell into it. The first version of the "creations at the same
+instant" test passed even with the lock removed! The first request reused an idle database
+connection, while the others had to open new ones, which took long enough for the first
+request to finish before the others started. The race never happened. The fix:
+`warmUpPool()` opens several connections before the race, and now the test fails without
+the lock (five workspaces created instead of one) and passes with it. **Always check that a
+race test fails without the fix**, or it proves nothing.
+
+**Rule 5: preconditions and post-conditions.** `assertAnotherOwnerExists()` is a
+**precondition**: it refuses a request that would remove the last owner, with
+`409 LAST_OWNER`, because that's the user's mistake. After the change,
+`checkWorkspaceHasOwner()` checks the **post-condition** with `invariant()`: the workspace
+still has an owner. If that ever fails, the precondition has a bug, so the transaction rolls
+back and the client gets a 500. Even a future bug can't leave a workspace without an owner.
+
+**Rule 4: small functions.** The routes plugin had grown to 70 lines, so members got their own
+plugin and service (`members.routes.ts`, `members.service.ts`), and `accept()` is split into
+small private steps, each with one job.
+
+**Rule 7: say what you mean.** Every "not found" check is an explicit `=== null`, and
+`test/input-bounds.test.ts` now checks the workspace and invitation schemas too.
+
+### Build it yourself
+
+1. Add `Workspace` and `Membership` with the enum, migrate, and read the SQL.
+2. `POST /workspaces` with the nested write; `GET /workspaces` listing your memberships.
+3. Write `can()` and its unit tests _first_, then use it in `PATCH` and `DELETE`.
+4. Add `GET /workspaces/:id` and write the "outsider gets the same 404 as a missing id"
+   test.
+5. Add member role changes and removal with the "last owner" check, _without_ the lock.
+   Write the "two owners leave at the same instant" test and watch it fail. Then add the
+   transaction and `FOR UPDATE`, and watch it pass.
+6. Add invitations: create (token once, hash stored), accept (email must match), revoke
+   (scoped by workspace: write the IDOR test).
+7. Add the quotas. Write the "two creations at the same instant" test first, watch it fail
+   without `lockUser()`, then add the lock.
+
+### Exercises
+
+1. **Transfer ownership in one call.** Add `POST /workspaces/:id/transfer-ownership
+{ userId }` that makes the target an OWNER and the caller an ADMIN, atomically. Which
+   lock do you need? What if the target isn't a member?
+2. **My invitations.** Add `GET /users/me/invitations` listing pending invitations sent to
+   the caller's email, so people can find them without a link. Is it safe to return the
+   workspace name? What about the token?
+3. **Audit log.** Create an `audit_events` table (who, what, when, workspace) and record
+   every role change and removal. Write it in the _same_ transaction as the change. Why?
+4. **Email verification.** Add `emailVerifiedAt` to users and require it in `accept()`.
+   How would you test it without sending real emails?
+5. **Show the quota.** Make `GET /workspaces` return `{ "data": [...], "limit": 50 }` so a
+   client can show "3 of 50 workspaces". Is that a breaking change? (Hint: Concept 10.)
+6. **Lock strength.** Postgres also has `FOR NO KEY UPDATE`, a weaker lock that doesn't
+   block other transactions inserting rows that reference the workspace (their foreign key
+   check takes a `FOR KEY SHARE` lock). Read the "Row-level locks" table in the Postgres
+   docs. Would it still protect our invariants? What would it improve once projects and
+   tasks reference workspaces?
+7. **Think about it.** We lock the workspace row with `FOR UPDATE`. Another option is running
+   the transaction at the `SERIALIZABLE` isolation level. What would change, and what would
+   your code need to do when Postgres aborts a transaction with a serialization error?
+
+### Words to know
+
+authentication vs authorization · tenant / multi-tenancy · join table · composite primary
+key · ON DELETE CASCADE / RESTRICT / SET NULL · RBAC · least privilege · policy · 403 vs 404 ·
+IDOR / BOLA · invariant · race condition · TOCTOU · transaction · row lock (`FOR UPDATE`) ·
+serialization · conditional update · nested write · response envelope · quota ·
+lock ordering · deadlock · precondition · post-condition

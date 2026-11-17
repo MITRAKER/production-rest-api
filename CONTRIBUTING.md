@@ -199,14 +199,19 @@ Tests use [Vitest](https://vitest.dev/) and live in `test/`, one `*.test.ts` fil
 - **Real users.** `signUp(app, 'Alice')` registers a user through the real endpoint and
   returns their id, email and `api`, a small client that sends that user's access token.
   `client(app)` sends requests without a token.
-- **Test the unhappy paths.** For each endpoint, check that a request without a token gets
-  `401`, invalid input gets `400`, and conflicts get `409`. Then test the invariants: expired
-  or reused tokens and simultaneous requests (`Promise.all`).
+- **The standard cast.** For anything involving permissions, `createTeam(app)` creates the
+  workspace "Acme" with **Alice** (OWNER), **Bob** (ADMIN) and **Carol** (MEMBER), plus
+  **Dave**, who is not a member. Bob and Carol join through the real invitation flow.
+- **Test the unhappy paths.** For each endpoint, check that the allowed role succeeds, the
+  next role down gets `403`, Dave gets `404`, a request without a token gets `401` and invalid
+  input gets `400`. Then test the invariants: the last owner, quotas, expired or reused tokens
+  and simultaneous requests (`Promise.all`).
 - **Make race tests really race.** Call `warmUpPool(app)` right before the `Promise.all`.
   Without it, the requests wait for new database connections one by one, run one after the
   other, and the test passes even if the lock it is about is missing. Check every race test
   both ways: it passes with the fix and fails when you remove it.
-- **Pure logic gets unit tests.** Code without I/O, like `scripts/changelog-section.mjs`, is
+- **Pure logic gets unit tests.** Code without I/O, like the permission rules in
+  `workspaces.policy.ts` or `scripts/changelog-section.mjs`, is
   tested directly, without the database.
 
 ```ts

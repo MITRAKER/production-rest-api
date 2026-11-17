@@ -14,6 +14,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   graceful shutdown, a multi-stage Docker image and Docker Compose.
 - Authentication: register, login, refresh token rotation with reuse detection, logout and
   `GET /users/me`, with argon2id password hashing and rate limiting.
+- Workspaces with role-based permissions (owner, admin, member): create, list, rename and
+  delete workspaces; list members, change roles, remove members or leave; invite by email
+  with single-use, expiring tokens. Outsiders get `404`, row locks keep at least one owner
+  in every workspace, and quotas limit workspaces per user, members per workspace and
+  pending invitations (`409 LIMIT_REACHED`).
 - Quality gates: the strictest TypeScript settings, ESLint with the NASA/JPL "Power of Ten"
   rules (including a custom rule that bans recursion), Prettier, Git hooks (Husky,
   lint-staged, commitlint) and a test coverage threshold.

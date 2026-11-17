@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import * as authSchemas from '../src/modules/auth/auth.schemas.js';
+import * as invitationSchemas from '../src/modules/invitations/invitations.schemas.js';
+import * as workspaceSchemas from '../src/modules/workspaces/workspaces.schemas.js';
 
 /**
  * Power of Ten rule 3, checked automatically: every value a client can send
@@ -10,7 +12,11 @@ import * as authSchemas from '../src/modules/auth/auth.schemas.js';
  *
  * When you add a schema module, add it to `modules` below.
  */
-const modules: Record<string, Record<string, unknown>> = { auth: authSchemas };
+const modules: Record<string, Record<string, unknown>> = {
+  auth: authSchemas,
+  workspaces: workspaceSchemas,
+  invitations: invitationSchemas,
+};
 
 type JsonNode = Record<string, unknown>;
 
