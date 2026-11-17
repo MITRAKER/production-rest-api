@@ -1,0 +1,11 @@
+// Prisma schema: the single source of truth for our database tables.
+// Step 1 has no tables yet. Step 2 adds User and RefreshToken.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
