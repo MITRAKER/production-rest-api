@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { alice, buildTestApp, registerUser, resetDb } from './helpers.js';
+import { alice, buildTestApp, registerUser, resetDb, sleep, warmUpPool } from './helpers.js';
 
 let app: FastifyInstance;
 
@@ -145,7 +145,7 @@ describe('GET /users/me', () => {
     const shortLived = await buildTestApp({ JWT_ACCESS_TTL: '1ms' });
     try {
       const { accessToken } = await registerUser(shortLived);
-      await new Promise((r) => setTimeout(r, 1100));
+      await sleep(1100);
       const res = await shortLived.inject({
         method: 'GET',
         url: '/users/me',
@@ -204,6 +204,7 @@ describe('POST /auth/refresh', () => {
 
   it('lets only one of two simultaneous refreshes win, then ends the session', async () => {
     const { refreshToken } = await registerUser(app);
+    await warmUpPool(app);
     const results = await Promise.all([
       app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } }),
       app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } }),
@@ -269,6 +270,44 @@ describe('POST /auth/logout', () => {
       payload: { refreshToken: 'whatever' },
     });
     expect(res.statusCode).toBe(204);
+  });
+
+  it('ends the session even when given a token that was already rotated', async () => {
+    const { refreshToken: original } = await registerUser(app);
+    const rotated = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken: original },
+    });
+    await app.inject({ method: 'POST', url: '/auth/logout', payload: { refreshToken: original } });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken: rotated.json().refreshToken },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('leaves no live token when a logout races a refresh', async () => {
+    // Without the user lock, a logout that starts while a refresh is rotating
+    // the token misses the new token, and the session survives the logout.
+    // The small delays make the two requests overlap in different ways.
+    const { refreshToken: first } = await registerUser(app);
+    await app.inject({ method: 'POST', url: '/auth/logout', payload: { refreshToken: first } });
+    for (const delayMs of [0, 1, 2, 3, 4, 5, 6, 7]) {
+      const login = await app.inject({ method: 'POST', url: '/auth/login', payload: alice });
+      const { refreshToken } = login.json<{ refreshToken: string }>();
+      await warmUpPool(app);
+      await Promise.all([
+        app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } }),
+        sleep(delayMs).then(() =>
+          app.inject({ method: 'POST', url: '/auth/logout', payload: { refreshToken } }),
+        ),
+      ]);
+      const live = await app.prisma.refreshToken.count({ where: { revokedAt: null } });
+      expect(live, `live tokens after a logout ${String(delayMs)} ms into a refresh`).toBe(0);
+    }
   });
 });
 

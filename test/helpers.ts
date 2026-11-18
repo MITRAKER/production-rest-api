@@ -18,6 +18,24 @@ export async function resetDb(app: FastifyInstance) {
   await app.prisma.$executeRawUnsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
 }
 
+/**
+ * Opens several database connections before a race test.
+ *
+ * Call it right before a `Promise.all` of requests that are meant to race.
+ * Otherwise only one connection is open: the first request takes it and the
+ * others wait while new connections are set up, so they reach the database
+ * one after the other and never actually race. Such a test passes even
+ * without the lock it is supposed to check.
+ */
+export async function warmUpPool(app: FastifyInstance, connections = 6) {
+  await Promise.all(Array.from({ length: connections }, () => app.prisma.$queryRaw`SELECT 1`));
+}
+
+/** Resolves after `ms` milliseconds. */
+export async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export interface TestUser {
   email: string;
   password: string;

@@ -5,6 +5,7 @@ import { Prisma } from '../../generated/prisma/client.js';
 import type { Db } from '../../lib/db.js';
 import { Errors } from '../../lib/errors.js';
 import { invariant } from '../../lib/invariant.js';
+import { lockUser } from '../../lib/locks.js';
 import { generateToken, hashToken } from '../../lib/tokens.js';
 import type { LoginInput, RegisterInput } from './auth.schemas.js';
 
@@ -77,7 +78,7 @@ export class AuthService {
     if (stored === null) throw Errors.invalidRefreshToken();
 
     if (stored.revokedAt !== null) {
-      await this.revokeFamily(stored.familyId);
+      await this.revokeFamily(stored);
       this.app.log.warn({ userId: stored.userId }, 'refresh token reuse detected; family revoked');
       throw Errors.invalidRefreshToken();
     }
@@ -86,18 +87,21 @@ export class AuthService {
     const rotated = await this.rotate(stored);
     if (rotated === null) {
       // Someone used this token a split second before us: treat it as reuse.
-      await this.revokeFamily(stored.familyId);
+      await this.revokeFamily(stored);
       throw Errors.invalidRefreshToken();
     }
     return rotated;
   }
 
-  /** Logging out revokes the whole session (family). Always succeeds. */
+  /**
+   * Logging out revokes the whole session (family), even if the token given
+   * was already rotated: any token of the session identifies it. Always succeeds.
+   */
   async logout(refreshToken: string) {
     const stored = await this.prisma.refreshToken.findUnique({
       where: { tokenHash: hashToken(refreshToken) },
     });
-    if (stored !== null) await this.revokeFamily(stored.familyId);
+    if (stored !== null) await this.revokeFamily(stored);
   }
 
   /**
@@ -107,6 +111,9 @@ export class AuthService {
    */
   private async rotate(stored: { id: string; userId: string; familyId: string }) {
     return this.prisma.$transaction(async (tx) => {
+      // Rotations and revocations of one user's sessions run one at a time
+      // (see revokeFamily).
+      await lockUser(tx, stored.userId);
       // Conditional update: only succeeds if nobody revoked it in the meantime.
       const { count } = await tx.refreshToken.updateMany({
         where: { id: stored.id, revokedAt: null },
@@ -129,10 +136,21 @@ export class AuthService {
     });
   }
 
-  private async revokeFamily(familyId: string) {
-    await this.prisma.refreshToken.updateMany({
-      where: { familyId, revokedAt: null },
-      data: { revokedAt: new Date() },
+  /**
+   * Revokes every live token of a session. It takes the same user lock as
+   * rotate() first. Without it, a revocation running while a refresh is
+   * rotating the token would skip the new token (it doesn't exist yet when
+   * the UPDATE starts), and the session would live on after a logout. With
+   * it, the revocation waits for the rotation to commit, then sees and
+   * revokes the new token too.
+   */
+  private async revokeFamily(stored: { userId: string; familyId: string }) {
+    await this.prisma.$transaction(async (tx) => {
+      await lockUser(tx, stored.userId);
+      await tx.refreshToken.updateMany({
+        where: { familyId: stored.familyId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
     });
   }
 
