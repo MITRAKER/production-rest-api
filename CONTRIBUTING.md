@@ -77,8 +77,13 @@ into a stack of PRs where each one builds on the one before it.
 In a stack, each PR targets the branch of the PR below it instead of `main`. Merge the PRs **in
 order, bottom first, with "Create a merge commit"**, never with "Squash and merge" or "Rebase and
 merge". A merge commit keeps the commits that the next PR is built on. Squashing or rebasing
-rewrites them, so the next PR would show those changes again and could conflict. When a merged
-PR's branch is deleted, GitHub retargets the next PR in the stack to `main` automatically.
+rewrites them, so the next PR would show those changes again and could conflict.
+
+After merging a PR, delete its branch (the **Delete branch** button on the merged PR, or turn on
+**Automatically delete head branches** in the repository settings). GitHub then retargets the
+next PR in the stack to `main`. If the branch is kept, the next PR still targets it, and
+merging that PR puts its commits on the old branch instead of `main`. So before merging a
+stacked PR, check that the top of the page says it will merge into `main`.
 
 ## Commit messages and pull request titles
 
@@ -133,17 +138,18 @@ pull request, so skipping the hooks only moves the failure to your PR.
 CI runs these checks on every pull request (see [`.github/workflows`](./.github/workflows)),
 and all of them must pass before merging:
 
-| Check              | Command or tool                     | Passes when                                                                         |
-| ------------------ | ----------------------------------- | ----------------------------------------------------------------------------------- |
-| Formatting         | `npm run format:check`              | Every file is formatted by Prettier                                                 |
-| Lint               | `npm run lint`                      | ESLint reports no errors and no warnings (`--max-warnings 0`)                       |
-| Types              | `npm run typecheck`                 | The TypeScript compiler finds no errors in `src`, `test` and `scripts`              |
-| Tests and coverage | `npm run test:coverage`             | All tests pass against PostgreSQL 16 and coverage meets the thresholds              |
-| Commit messages    | commitlint                          | The pull request title and every commit follow Conventional Commits                 |
-| Dependency audit   | `npm audit`, `npm audit signatures` | No high or critical vulnerability in production dependencies; all signatures valid  |
-| Docker image       | `docker build`, smoke test, Trivy   | The image builds, migrates a real database, starts and serves requests; no high CVE |
-| Code scanning      | CodeQL                              | No new security alerts in the code or the workflows                                 |
-| Dependency review  | GitHub dependency review            | The pull request adds no vulnerable dependency and no unexpected license            |
+| Check              | Command or tool                     | Passes when                                                                                                           |
+| ------------------ | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Formatting         | `npm run format:check`              | Every file is formatted by Prettier                                                                                   |
+| Lint               | `npm run lint`                      | ESLint reports no errors and no warnings (`--max-warnings 0`)                                                         |
+| Types              | `npm run typecheck`                 | The TypeScript compiler finds no errors in `src`, `test` and `scripts`                                                |
+| Tests and coverage | `npm run test:coverage`             | All tests pass against PostgreSQL 16 and coverage meets the thresholds                                                |
+| Commit messages    | commitlint                          | Every commit follows Conventional Commits                                                                             |
+| Pull request title | commitlint                          | The title follows Conventional Commits (checked again whenever you edit it)                                           |
+| Dependency audit   | `npm audit`, `npm audit signatures` | No high or critical vulnerability in production dependencies; all signatures valid                                    |
+| Docker images      | `docker build`, smoke test, Trivy   | Both build; one migrates a real database, the other starts and serves requests; no fixable high or critical CVE       |
+| Code scanning      | CodeQL                              | No new security alerts in the code or the workflows                                                                   |
+| Dependency review  | GitHub dependency review            | No added or updated dependency (production or development) has a high-severity vulnerability or an unexpected license |
 
 `npm run check` runs the first four exactly as CI does, so run it before you push. To fix
 problems quickly, `npm run format` formats everything and `npm run lint:fix` fixes what
@@ -196,6 +202,10 @@ Tests use [Vitest](https://vitest.dev/) and live in `test/`, one `*.test.ts` fil
 - **Test the unhappy paths.** For each endpoint, check that a request without a token gets
   `401`, invalid input gets `400`, and conflicts get `409`. Then test the invariants: expired
   or reused tokens and simultaneous requests (`Promise.all`).
+- **Make race tests really race.** Call `warmUpPool(app)` right before the `Promise.all`.
+  Without it, the requests wait for new database connections one by one, run one after the
+  other, and the test passes even if the lock it is about is missing. Check every race test
+  both ways: it passes with the fix and fails when you remove it.
 - **Pure logic gets unit tests.** Code without I/O, like `scripts/changelog-section.mjs`, is
   tested directly, without the database.
 
@@ -276,6 +286,8 @@ backward-compatible fixes.
    ```bash
    npm version X.Y.Z --no-git-tag-version
    ```
+
+   For the very first release, `package.json` already says `1.0.0`: skip this step.
 
 3. In `CHANGELOG.md`, move the notes from `## [Unreleased]` to a new `## [X.Y.Z] - YYYY-MM-DD`
    heading (today's date), leave the empty `## [Unreleased]` heading above it, and update the

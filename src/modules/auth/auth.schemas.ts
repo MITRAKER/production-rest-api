@@ -11,7 +11,9 @@ import { z } from 'zod';
 // then check it's an email no longer than the 254 characters email allows.
 export const Email = z.string().max(320).trim().toLowerCase().pipe(z.email().max(254));
 
-// Upper bound matters: hashing a 1 MB "password" is a cheap way to burn our CPU.
+// Every input has an upper bound (Power of Ten rule 3). This one isn't what
+// protects the CPU: argon2 costs about the same for any password length (it
+// first condenses the password with a fast hash). The rate limit does that.
 const Password = z.string().min(8, 'must be at least 8 characters').max(128);
 
 export const RegisterBody = z.object({

@@ -292,8 +292,11 @@ leaked database. **argon2id** is designed to be slow and use lots of memory, whi
 that attack. It also adds a random **salt** per user, so two people with the same password
 get different hashes. The salt is stored inside the hash string (`$argon2id$v=19$m=…`).
 
-Also notice the password has a **max** length (128). Without it, someone could send a 10 MB
-password and make the server spend seconds hashing it.
+Also notice the password has a **max** length (128). It's a sanity bound, like the maximum on
+every other string (chapter 3, rule 3), but it isn't what protects the CPU: argon2 first
+condenses the password with a fast hash, then does its slow work on that fixed-size result, so
+a 10 KB password costs about the same as an 8-character one. Every hash still costs real CPU,
+which is why the authentication endpoints are rate limited (Concept 9).
 
 ### Concept 3: Don't leak which emails exist
 
@@ -303,6 +306,11 @@ password". If the messages differed, attackers could build a list of real accoun
 Subtler: if unknown emails returned instantly but real ones took 100 ms (argon2 is slow),
 the _timing_ would leak the same thing. So for unknown emails we still run
 `argon2.verify` against a dummy hash. Look for `dummyHash` in `auth.service.ts`.
+
+One endpoint still tells: registering an email that already exists answers
+`409 EMAIL_TAKEN`. Most sign-up forms accept that trade-off. Avoiding it needs email
+verification: always answer "check your inbox", then email either a welcome link or "you
+already have an account". Meanwhile, the rate limit makes testing emails one by one slow.
 
 ### Concept 4: Access tokens (JWT)
 
@@ -465,10 +473,10 @@ and 2:
 - **The documents every serious repository has:** README badges, CONTRIBUTING, SECURITY,
   CODE_OF_CONDUCT, CHANGELOG, issue and pull request templates, CODEOWNERS.
 
-The new rules found real problems in the code we had already written. Fixing them was part of
-this step:
+The new rules, and a review of the code with them in mind, found real problems in the code we
+had already written. Fixing them was part of this step:
 
-| Problem the rules found                                                                     | Fix                                                                       |
+| Problem found                                                                               | Fix                                                                       |
 | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | A crash between "create the user" and "create their first session" left a user half-created | Both writes happen in one transaction                                     |
 | A crash between "revoke the old refresh token" and "issue the new one" logged the user out  | Rotation is one transaction, and an `invariant()` checks its result       |
@@ -478,8 +486,10 @@ this step:
 | The shutdown handler could hang forever, and an error in it was never handled               | `shutdown()` handles its own errors, and exits anyway after 10 seconds    |
 | A module-level `let` held the dummy password hash                                           | It's a private field of `AuthService`                                     |
 | Checks like `if (!user \|\| !ok)` relied on "truthiness"                                    | Explicit comparisons: `if (user === null \|\| !passwordMatches)`          |
+| A logout that arrived while a refresh was rotating the token missed the new token           | Rotation and revocation lock the user's row first: they run one at a time |
+| Prisma's own transaction limits (2 s to start, 5 s in total) applied without anyone knowing | Declared in `src/config/limits.ts` and passed to Prisma                   |
 
-The test suite grew from 24 to 58 tests. Line coverage is about 97%, and CI fails if it drops
+The test suite grew from 24 to 60 tests. Line coverage is about 98%, and CI fails if it drops
 below the thresholds in `vitest.config.ts`.
 
 ### New files
@@ -487,6 +497,7 @@ below the thresholds in `vitest.config.ts`.
 ```
 .github/
   workflows/ci.yml             # every PR: format, lint, types, tests, commits, audit, Docker
+  workflows/pr-title.yml       # the PR title follows Conventional Commits (rechecked on edit)
   workflows/codeql.yml         # security static analysis of the code and the workflows
   workflows/dependency-review.yml  # blocks vulnerable dependencies and unexpected licenses
   workflows/scorecard.yml      # OpenSSF Scorecard: grades our security practices weekly
@@ -503,6 +514,7 @@ scripts/changelog-section.mjs  # release notes from CHANGELOG.md
 scripts/coverage-summary.mjs   # coverage table on the CI run page
 src/config/limits.ts           # every resource limit, in one place (rule 3)
 src/lib/invariant.ts           # assertions (rule 5)
+src/lib/locks.ts               # row locks, so some transactions run one at a time
 src/lib/db.ts, src/lib/tokens.ts
 test/input-bounds.test.ts      # proves every input string and array has a maximum size
 test/no-recursion-rule.test.ts # tests for our lint rule
@@ -636,8 +648,8 @@ The rule even reaches the CI scripts: the Docker smoke test waits for the API wi
 #### Rule 3: bounded resources
 
 C programs on spacecraft allocate all their memory at startup, so they can never run out
-mid-flight. A Node.js server can't do that, but it can make sure **nothing grows or waits
-without a limit**. All the limits live in `src/config/limits.ts`:
+mid-flight. A Node.js server can't do that, but it can make sure that **no input is unbounded
+and nothing waits without a limit**. All the limits live in `src/config/limits.ts`:
 
 | Limit                     | Value | Default without it                                           |
 | ------------------------- | ----- | ------------------------------------------------------------ |
@@ -646,12 +658,20 @@ without a limit**. All the limits live in `src/config/limits.ts`:
 | Database connections      | 10    | 10, now explicit and configurable with `DATABASE_POOL_MAX`   |
 | Wait for a DB connection  | 5 s   | Wait forever when the pool is busy                           |
 | One SQL statement         | 10 s  | No limit: one slow query could hold a connection forever     |
+| Start a transaction       | 5 s   | 2 s, Prisma's default: easy to miss                          |
+| One whole transaction     | 10 s  | 5 s, Prisma's default: easy to miss                          |
 | Graceful shutdown         | 10 s  | Wait forever for open requests                               |
 
 And every string a client can send has a maximum length, every array a maximum size. A
 reviewer could miss a missing `.max()`, so a test checks it for us: `test/input-bounds.test.ts`
 converts every input schema to JSON Schema and fails if any string or array is unbounded.
 When you add an endpoint, the test checks its schemas automatically.
+
+What still grows is **history**. Every login and every refresh stores a refresh token row, and
+nothing deletes the old ones yet. Requests stay fast (every lookup uses an index and every
+list is capped), but a table that only grows needs housekeeping. A production deployment runs
+a scheduled job that deletes tokens that expired a while ago, a fixed number of rows at a time
+(rule 2 again). Writing it is one of the exercises below.
 
 #### Rule 5: assertions
 
@@ -700,7 +720,7 @@ naturally longer than 60 lines.
 ### Concept 4: Tests and coverage
 
 **Coverage** measures which lines and branches of `src/` ran during the tests. We're at about
-97% of lines, and `vitest.config.ts` makes CI fail below 90% of lines and 85% of branches.
+98% of lines, and `vitest.config.ts` makes CI fail below 90% of lines and 85% of branches.
 
 Coverage tells you what is _not_ tested, but a high number doesn't prove much: a test that
 calls a function without checking the result raises coverage and catches nothing. So the new
@@ -708,6 +728,21 @@ tests check behavior: a 500 hides the internal error message, a 100 KB body gets
 malformed JSON gets `400`, two simultaneous refreshes with the same token give exactly one
 `200` and one `401` and revoke the session. 100% is not the goal: the last few percent are
 usually code that's hard to reach, and chasing them produces tests that check nothing.
+
+**Race tests need extra care.** Two requests started together with `Promise.all` only overlap
+if both can reach the database at the same moment. With a single open connection, the second
+request waits while a new connection is set up, so the two run one after the other, and the
+test passes even without the protection it's supposed to check. Our first race tests had
+exactly that flaw: a review removed the fixes and the tests still passed. `warmUpPool()` in
+`test/helpers.ts` now opens a few connections first, and every race test was checked both
+ways: it passes with the fix and fails without it.
+
+That review also found a real race. A logout that arrived while a refresh was rotating the
+token revoked the old token but missed the new one, which didn't exist yet when the logout's
+`UPDATE` started, so the session lived on. Now both start with `lockUser()` from
+`src/lib/locks.ts` (`SELECT ... FOR UPDATE` on the user's row), so the second one waits for
+the first and then sees its result. A test fires the logout at different moments of a refresh
+and checks that no live token is left.
 
 ### Concept 5: Git hooks and Conventional Commits
 
@@ -732,7 +767,9 @@ docs(learning): add chapter 3
 
 The history becomes readable at a glance, and tools can generate changelogs and pick the next
 version number from it (`feat` means a new minor version, `fix` a patch, `!` a major). CI
-checks the pull request title and every commit in it.
+checks every commit of a pull request, and a small workflow of its own, `pr-title.yml`, checks
+the title. It runs again whenever the title is edited: re-running an old check wouldn't help,
+because a run always uses the title it started with.
 
 ### Concept 6: How a GitHub Actions workflow works
 
@@ -746,7 +783,7 @@ pull request ─┬─ Format, lint and types
               ├─ Commit messages
               ├─ Tests and coverage ──── with a Postgres service container
               ├─ Dependency audit
-              └─ Docker image ─────────── build → migrate → start → call the API → Trivy scan
+              └─ Docker image ─────────── build → migrate → start → call the API → scan both images
 ```
 
 Some details worth knowing:
@@ -766,9 +803,14 @@ Some details worth knowing:
 CI runs code with access to your repository, so it's a favorite target for attackers. Four
 habits protect it:
 
-1. **Least privilege.** Every workflow starts with `permissions: contents: read`. A job that
-   needs more asks for exactly that: CodeQL gets `security-events: write`, the release job
-   gets `packages: write`. If a step is compromised, it can't push code.
+1. **Least privilege.** Every workflow starts with a read-only token:
+   `permissions: contents: read`, or `read-all` in `scorecard.yml`, as in Scorecard's own
+   example: it reads many parts of the repository, and writes none. A job that needs more
+   asks for exactly that: CodeQL gets `security-events: write`, the image job
+   `packages: write`. If a step of a read-only job is compromised, it can't push code. The one
+   job that can write to the repository (it creates the GitHub release) runs no action and no
+   code from the repository, only the GitHub CLI, so no third-party code ever holds that
+   token.
 2. **Pin actions to a commit SHA.** `uses: actions/checkout@v7` points to a _tag_, and tags
    can be moved. In March 2025, attackers moved the tags of the popular
    `tj-actions/changed-files` action to malicious code that printed CI secrets into public
@@ -786,8 +828,10 @@ habits protect it:
    run: printf '%s\n' "$PR_TITLE" | npx --no -- commitlint
    ```
 
-4. **Don't leave credentials lying around.** `persist-credentials: false` stops
-   `actions/checkout` from saving the token in `.git/config`, where later steps could read it.
+4. **Don't leave credentials lying around.** By default `actions/checkout` keeps the token on
+   the runner after cloning, so later Git commands can use it. Since checkout v6 it sits in a
+   credentials file under `$RUNNER_TEMP` that `.git/config` points to. Any later step could
+   read it from there, so `persist-credentials: false` tells checkout not to keep it.
 
 CodeQL also scans the workflow files (the `actions` language), and OpenSSF Scorecard checks
 all of this every week.
@@ -797,14 +841,14 @@ all of this every week.
 `package-lock.json` lists about 500 packages. Any of them can have a vulnerability, or be
 taken over by an attacker. Each layer catches something different:
 
-| Tool                   | What it does                                                                       |
-| ---------------------- | ---------------------------------------------------------------------------------- |
-| `npm ci` + lockfile    | Installs exactly the locked versions, and checks each download against its hash    |
-| `npm audit`            | Fails CI if a production dependency has a known high or critical vulnerability     |
-| `npm audit signatures` | Verifies every package was signed by the npm registry, so it wasn't modified       |
-| Dependency review      | Blocks a pull request that _adds_ a vulnerable dependency or an unexpected license |
-| Dependabot             | Opens weekly pull requests with updates, and immediate ones for security fixes     |
-| `overrides`            | Forces a fixed version of a nested dependency when its parent hasn't updated yet   |
+| Tool                   | What it does                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------------ |
+| `npm ci` + lockfile    | Installs exactly the locked versions, and checks each download against its hash                        |
+| `npm audit`            | Fails CI if a production dependency has a known high or critical vulnerability                         |
+| `npm audit signatures` | Verifies every package was signed by the npm registry, so it wasn't modified                           |
+| Dependency review      | Blocks a pull request that adds or updates a vulnerable dependency, or brings in an unexpected license |
+| Dependabot             | Opens weekly pull requests with updates, and immediate ones for security fixes                         |
+| `overrides`            | Forces a fixed version of a nested dependency when its parent hasn't updated yet                       |
 
 We used the last one already. `npm audit` reported a known vulnerability in `minimatch`, a
 package that `eslint-plugin-sonarjs` depends on. SonarJS hadn't released a fix, so
@@ -816,6 +860,10 @@ package that `eslint-plugin-sonarjs` depends on. SonarJS hadn't released a fix, 
 
 Licenses matter too: dependency review only allows licenses that are compatible with a
 project shipped under MIT.
+
+Development dependencies count. Dependency review checks only production (runtime)
+dependencies unless you ask for more, but ESLint plugins and test tools run on your machine and
+in CI, with access to the code. So `fail-on-scopes` includes development dependencies too.
 
 ### Concept 9: Static analysis for security with CodeQL
 
@@ -841,14 +889,18 @@ The image got several upgrades:
   `npm prune --omit=dev` kept the CLI and Prisma Studio in the image. Adding `--omit=optional`
   took `node_modules` from 357 MB to 107 MB. Less code shipped is less code that can have a
   vulnerability.
-- **No package managers.** The final stage deletes npm, npx and corepack: the app never
-  installs anything at runtime. It also runs `apk upgrade` to install the latest Alpine
-  security fixes, and still runs as the unprivileged `node` user.
+- **No npm in production.** The final stage deletes npm, npx, corepack and yarn: the app
+  never installs anything at runtime. Alpine's own package manager, `apk`, stays, but only
+  root can use it, and the container runs as the unprivileged `node` user. The stage also
+  runs `apk upgrade` to install the latest Alpine security fixes.
+- **Two images, both hardened.** The migration image needs the Prisma CLI, which is a
+  development dependency, so it is bigger. It's published too, so it also runs as `node`,
+  gets `apk upgrade` and is scanned.
 - **A smoke test in CI.** "It builds" doesn't mean "it runs". The Docker job runs the
   migration image against a real Postgres, starts the API image, waits for
   `/health/ready`, and registers a user. That catches a missing file, a native module built
   for the wrong system, or a migration that fails.
-- **A vulnerability scan.** **Trivy** lists every package in the image (Alpine packages and
+- **A vulnerability scan.** **Trivy** lists every package in each image (Alpine packages and
   npm packages) and compares them with vulnerability databases. CI fails on any high or
   critical vulnerability that has a fix available.
 
@@ -867,9 +919,13 @@ A **release** is a version of the API that you can deploy and refer to later.
   the whole CI pipeline on that commit, publishes the API and migration images to GitHub
   Container Registry, and creates a GitHub release with the changelog notes.
 
-The images are published with **provenance** (a signed record of how and where they were
-built) and an **SBOM** (software bill of materials: the list of every package inside), so
-anyone running them can check where they came from and what's in them.
+The images are published with **provenance** (a record of how and where they were built:
+which workflow, from which commit) and an **SBOM** (software bill of materials: the list of
+every package inside). Both are attached to the image, which tells you what's in it. They
+aren't signed, though, so they aren't _proof_: someone who could push to the package could
+replace the image and its provenance together. Signing them (with GitHub's artifact
+attestations or Sigstore's cosign) is what lets anyone verify where an image came from. That's
+an exercise below.
 
 ### Concept 12: The documents of a professional repository
 
@@ -926,8 +982,16 @@ form SECURITY.md links to) and **Dependabot alerts**.
    `docker build -t api . && docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image api`.
    Then scan `node:26` (not Alpine). Why is the difference so big?
 6. **Make a release.** Follow "Releasing" in CONTRIBUTING.md to publish `v1.0.0`, and watch
-   each job of the release workflow.
-7. **Think about it.** Why does the release workflow rerun CI instead of trusting the pull
+   each job of the release workflow. (`package.json` already says `1.0.0`, so skip the
+   version bump.)
+7. **Sign the images.** Add `actions/attest-build-provenance` to the images job (it needs
+   `id-token: write` and `attestations: write`), make a release, and verify an image with
+   `gh attestation verify oci://ghcr.io/<owner>/production-rest-api:1.0.0 --owner <owner>`.
+8. **Clean up history.** Write a job that deletes refresh tokens that expired more than a day
+   ago, at most 1,000 rows per run. Postgres has no `DELETE ... LIMIT`: select the ids first.
+   Should it run inside the API on a timer, or as its own scheduled job, like the migration
+   image? What happens if two copies of the API run it at the same time?
+9. **Think about it.** Why does the release workflow rerun CI instead of trusting the pull
    request's green check? Why ban `while` but allow `for...of`? Why is a high coverage
    number not proof that the code is well tested?
 

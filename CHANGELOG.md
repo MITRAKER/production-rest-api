@@ -17,20 +17,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Quality gates: the strictest TypeScript settings, ESLint with the NASA/JPL "Power of Ten"
   rules (including a custom rule that bans recursion), Prettier, Git hooks (Husky,
   lint-staged, commitlint) and a test coverage threshold.
-- CI/CD with GitHub Actions: formatting, lint, types, tests with coverage, commit message
-  checks, dependency audit, a Docker build with a smoke test and a Trivy scan, CodeQL,
-  dependency review, OpenSSF Scorecard, Dependabot, and a release workflow that publishes
-  Docker images to GitHub Container Registry.
+- CI/CD with GitHub Actions: formatting, lint, types, tests with coverage, commit message and
+  pull request title checks, dependency audit, a Docker build with a smoke test and Trivy
+  scans, CodeQL, dependency review, OpenSSF Scorecard, Dependabot, and a release workflow that
+  publishes Docker images to GitHub Container Registry.
 - Project documents: contributing guide, security policy, code of conduct, issue and pull
   request templates, CODEOWNERS, EditorConfig.
 
 ### Security
 
 - Explicit resource limits: request body size, request timeout, database pool size,
-  connection and statement timeouts, and a maximum length on every input string.
+  connection, statement and transaction timeouts, and a maximum length on every input string.
 - A sign-up and its first session are created in one transaction, and refresh token rotation
   asserts that a session has exactly one live token.
-- The Docker image is pinned by digest, runs on Node.js 26 LTS, gets the latest Alpine
-  security fixes and ships without npm or the Prisma CLI.
+- Logging out, or reusing an old refresh token, ends the session even while one of its
+  tokens is being rotated: rotation and revocation lock the user's row first.
+- Both Docker images are pinned by digest, run on Node.js 26 LTS as a non-root user and get
+  the latest Alpine security fixes. The API image ships without npm or the Prisma CLI.
 
 [Unreleased]: https://github.com/MITRAKER/production-rest-api/commits/main
