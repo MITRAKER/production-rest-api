@@ -60,12 +60,8 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      # Untrusted text (the title) goes through an environment variable,
-      # never straight into the script: that would allow script injection.
-      - name: Pull request title follows Conventional Commits
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: printf '%s\n' "$PR_TITLE" | npx --no -- commitlint --verbose
+      # The pull request title is checked by pr-title.yml, which also runs
+      # when the title is edited.
       - name: Every commit follows Conventional Commits
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -190,7 +186,8 @@ jobs:
       - name: Container logs
         if: ${{ always() }}
         run: docker logs api || true
-      # Runs even if the smoke test failed, so one run reports both problems.
+      # The scans run even if the smoke test failed, so one run reports every
+      # problem. Both images are published, so both are scanned.
       - name: Scan the API image for known vulnerabilities (Trivy)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -200,3 +197,13 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: '1'
+      - name: Scan the migration image for known vulnerabilities (Trivy)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: production-rest-api-migrate:ci
+          version: v0.70.0
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          skip-setup-trivy: true # installed by the step above

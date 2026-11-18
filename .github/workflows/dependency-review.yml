@@ -20,6 +20,10 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
+          # The default checks only runtime dependencies. Development tools
+          # run on our machines and in CI, with access to the code, so they
+          # are checked too.
+          fail-on-scopes: runtime, development
           # Permissive licenses, plus the weak-copyleft ones some dev tools use
           # (MPL-2.0: lightningcss, LGPL-3.0: SonarJS, EPL-2.0: a Prisma Studio
           # dependency). None of them is shipped modified or linked into our code.
