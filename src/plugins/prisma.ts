@@ -17,7 +17,9 @@ declare module 'fastify' {
  * instead of only inside this plugin's own scope.
  *
  * The pool is bounded (Power of Ten rule 3): at most `poolMax` connections,
- * a bounded wait for a free one, and a per-statement timeout in Postgres.
+ * a bounded wait for a free one, a per-statement timeout in Postgres, and a
+ * time limit for every transaction (Prisma's defaults, 2 s to start and 5 s
+ * in total, would otherwise apply silently).
  */
 export default fp<{ databaseUrl: string; poolMax: number }>(
   async (app, opts) => {
@@ -28,7 +30,13 @@ export default fp<{ databaseUrl: string; poolMax: number }>(
       idleTimeoutMillis: LIMITS.dbIdleTimeoutMs,
       statement_timeout: LIMITS.dbStatementTimeoutMs,
     });
-    const prisma = new PrismaClient({ adapter });
+    const prisma = new PrismaClient({
+      adapter,
+      transactionOptions: {
+        maxWait: LIMITS.dbConnectTimeoutMs,
+        timeout: LIMITS.dbTransactionTimeoutMs,
+      },
+    });
 
     await prisma.$connect();
     app.decorate('prisma', prisma);
