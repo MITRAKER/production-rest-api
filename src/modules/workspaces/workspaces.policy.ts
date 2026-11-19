@@ -41,9 +41,11 @@ export function can(role: WorkspaceRole, action: Action): boolean {
 
 /**
  * The second rule: you can only act on people (or invitations) with a
- * LOWER role than yours. An admin can remove a member or invite a member,
- * but can't remove another admin, remove an owner, or invite an admin.
- * Owners can therefore never be removed by anyone but themselves.
+ * LOWER role than yours, or on yourself. An admin can remove a member or
+ * invite a member, but can't remove another admin, remove an owner, or
+ * invite an admin. An owner can change the role of admins and members, but
+ * not of another owner. So only an owner can demote or remove themselves:
+ * by stepping down or leaving, and never as the last owner.
  */
 export function outranks(actor: WorkspaceRole, target: WorkspaceRole): boolean {
   return ROLE_RANK[actor] > ROLE_RANK[target];

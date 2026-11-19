@@ -54,14 +54,15 @@ export class WorkspaceService {
   }
 
   async update(workspaceId: string, userId: string, data: { name: string }) {
-    const membership = await requirePermission(
-      this.prisma,
-      workspaceId,
-      userId,
-      'workspace:update',
-    );
-    const workspace = await this.prisma.workspace.update({ where: { id: workspaceId }, data });
-    return { ...workspace, role: membership.role };
+    return this.prisma.$transaction(async (tx) => {
+      // Under the lock, the permission we check is still true when we write.
+      // Without it, a rename could land just after the caller lost their role,
+      // or just after the workspace was deleted (no row to update: a 500).
+      await lockWorkspace(tx, workspaceId);
+      const membership = await requirePermission(tx, workspaceId, userId, 'workspace:update');
+      const workspace = await tx.workspace.update({ where: { id: workspaceId }, data });
+      return { ...workspace, role: membership.role };
+    });
   }
 
   async delete(workspaceId: string, userId: string) {

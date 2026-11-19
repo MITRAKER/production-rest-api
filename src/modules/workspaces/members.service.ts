@@ -52,12 +52,19 @@ export class MemberService {
       // Lock first, then read: everything below sees a stable picture of the
       // workspace, and no other membership change can sneak in until we commit.
       await lockWorkspace(tx, workspaceId);
-      await requirePermission(tx, workspaceId, actorId, 'members:changeRole');
+      const actor = await requirePermission(tx, workspaceId, actorId, 'members:changeRole');
 
       const target = await tx.membership.findUnique({
         where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
       });
       if (target === null) throw Errors.notFound('Member');
+      // The same rule as removal: only people below you, or yourself. Without
+      // it, an owner could demote a co-owner and then remove them.
+      if (targetUserId !== actorId && !outranks(actor.role, target.role)) {
+        throw Errors.forbidden(
+          'You can only change the role of members with a lower role than yours',
+        );
+      }
 
       if (target.role === 'OWNER' && role !== 'OWNER') {
         await assertAnotherOwnerExists(tx, workspaceId);

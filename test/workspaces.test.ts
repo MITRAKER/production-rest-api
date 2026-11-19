@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { buildTestApp, client, createTeam, resetDb, signUp } from './helpers.js';
+import { buildTestApp, client, createTeam, resetDb, signUp, warmUpPool } from './helpers.js';
 
 let app: FastifyInstance;
 
@@ -93,6 +93,21 @@ describe('PATCH /workspaces/:workspaceId', () => {
     expect(member.json().error.code).toBe('FORBIDDEN');
     expect((await team.outsider.api.patch(team.url, { name: 'Hacked' })).statusCode).toBe(404);
   });
+
+  it('answers 404, never 500, when a rename races a delete', async () => {
+    const team = await createTeam(app);
+
+    await warmUpPool(app);
+    const [deleted, renamed] = await Promise.all([
+      team.owner.api.delete(team.url),
+      team.admin.api.patch(team.url, { name: 'Acme Inc' }),
+    ]);
+
+    // Under the workspace lock they run one after the other: the rename
+    // either happens first (200) or finds the workspace gone (404).
+    expect(deleted.statusCode).toBe(204);
+    expect([200, 404]).toContain(renamed.statusCode);
+  });
 });
 
 describe('DELETE /workspaces/:workspaceId', () => {
@@ -155,6 +170,15 @@ describe('PATCH /workspaces/:workspaceId/members/:userId (change role)', () => {
     expect(byMember.statusCode).toBe(403);
   });
 
+  it('hides the workspace from outsiders (404)', async () => {
+    const team = await createTeam(app);
+    const res = await team.outsider.api.patch(`${team.url}/members/${team.member.id}`, {
+      role: 'ADMIN',
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe('NOT_FOUND');
+  });
+
   it('returns 404 for someone who is not a member, 400 for an unknown role', async () => {
     const team = await createTeam(app);
     const notMember = await team.owner.api.patch(`${team.url}/members/${team.outsider.id}`, {
@@ -186,21 +210,38 @@ describe('PATCH /workspaces/:workspaceId/members/:userId (change role)', () => {
     expect(res.json().role).toBe('MEMBER');
   });
 
-  it('keeps one owner even when two owners demote each other at the same instant', async () => {
+  it("doesn't let an owner demote, and then remove, another owner", async () => {
+    const team = await createTeam(app);
+    await team.owner.api.patch(`${team.url}/members/${team.admin.id}`, { role: 'OWNER' });
+
+    // Bob is now a co-owner. Owners rank equal, so he can't touch Alice.
+    const demote = await team.admin.api.patch(`${team.url}/members/${team.owner.id}`, {
+      role: 'MEMBER',
+    });
+    expect(demote.statusCode).toBe(403);
+    expect(demote.json().error.code).toBe('FORBIDDEN');
+    expect((await team.admin.api.delete(`${team.url}/members/${team.owner.id}`)).statusCode).toBe(
+      403,
+    );
+    expect((await team.owner.api.get(team.url)).json().role).toBe('OWNER');
+  });
+
+  it('keeps one owner even when two owners step down at the same instant', async () => {
     const team = await createTeam(app);
     await team.owner.api.patch(`${team.url}/members/${team.admin.id}`, { role: 'OWNER' });
 
     // Without the row lock, both requests could see "2 owners" and both succeed,
-    // leaving the workspace with no owner at all.
+    // leaving the workspace with no owner at all. warmUpPool() makes sure the
+    // two requests really run at the same time (see test/helpers.ts).
+    await warmUpPool(app);
     const results = await Promise.all([
-      team.owner.api.patch(`${team.url}/members/${team.admin.id}`, { role: 'MEMBER' }),
-      team.admin.api.patch(`${team.url}/members/${team.owner.id}`, { role: 'MEMBER' }),
+      team.owner.api.patch(`${team.url}/members/${team.owner.id}`, { role: 'ADMIN' }),
+      team.admin.api.patch(`${team.url}/members/${team.admin.id}`, { role: 'ADMIN' }),
     ]);
 
-    // With the lock, they run one after the other. The second one re-reads its
-    // caller's role under the lock, finds they were just demoted to MEMBER,
-    // and is refused with 403.
-    expect(results.map((r) => r.statusCode).sort((a, b) => a - b)).toEqual([200, 403]);
+    // With the lock, they run one after the other, and the second one finds
+    // its caller is now the last owner.
+    expect(results.map((r) => r.statusCode).sort((a, b) => a - b)).toEqual([200, 409]);
     const owners = await app.prisma.membership.count({
       where: { workspaceId: team.workspaceId, role: 'OWNER' },
     });
@@ -238,6 +279,14 @@ describe('DELETE /workspaces/:workspaceId/members/:userId (remove / leave)', () 
     expect(res.statusCode).toBe(403);
   });
 
+  it('hides the workspace from outsiders (404)', async () => {
+    const team = await createTeam(app);
+    const res = await team.outsider.api.delete(`${team.url}/members/${team.member.id}`);
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe('NOT_FOUND');
+    expect((await team.member.api.get(team.url)).statusCode).toBe(200);
+  });
+
   it('returns 404 when removing someone who is not a member', async () => {
     const team = await createTeam(app);
     const res = await team.admin.api.delete(`${team.url}/members/${team.outsider.id}`);
@@ -258,6 +307,7 @@ describe('DELETE /workspaces/:workspaceId/members/:userId (remove / leave)', () 
     const team = await createTeam(app);
     await team.owner.api.patch(`${team.url}/members/${team.admin.id}`, { role: 'OWNER' });
 
+    await warmUpPool(app);
     const results = await Promise.all([
       team.owner.api.delete(`${team.url}/members/${team.owner.id}`),
       team.admin.api.delete(`${team.url}/members/${team.admin.id}`),
