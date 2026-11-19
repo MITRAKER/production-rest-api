@@ -33,6 +33,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Logging out, or reusing an old refresh token, ends the session even while one of its
   tokens is being rotated: rotation and revocation lock the user's row first.
 - Both Docker images are pinned by digest, run on Node.js 26 LTS as a non-root user and get
-  the latest Alpine security fixes. The API image ships without npm or the Prisma CLI.
+  the latest Alpine security fixes. Neither ships npm, and the API image leaves out the
+  Prisma CLI.
 
 [Unreleased]: https://github.com/MITRAKER/production-rest-api/commits/main

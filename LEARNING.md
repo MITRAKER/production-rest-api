@@ -894,8 +894,13 @@ The image got several upgrades:
   root can use it, and the container runs as the unprivileged `node` user. The stage also
   runs `apk upgrade` to install the latest Alpine security fixes.
 - **Two images, both hardened.** The migration image needs the Prisma CLI, which is a
-  development dependency, so it is bigger. It's published too, so it also runs as `node`,
-  gets `apk upgrade` and is scanned.
+  development dependency, so it is bigger. It's published too, so it gets the same
+  treatment: it runs as `node`, gets `apk upgrade`, deletes npm and starts the CLI directly
+  (`node_modules/.bin/prisma migrate deploy`) instead of through `npx`, and it is scanned.
+  The first CI run showed why the npm part matters. npm carries its own copies of the
+  packages it uses, and Trivy found six high-severity vulnerabilities in two of them
+  (`brace-expansion` and `undici`) in the migration image, which still had npm. The API
+  image, without npm, was clean.
 - **A smoke test in CI.** "It builds" doesn't mean "it runs". The Docker job runs the
   migration image against a real Postgres, starts the API image, waits for
   `/health/ready`, and registers a user. That catches a missing file, a native module built

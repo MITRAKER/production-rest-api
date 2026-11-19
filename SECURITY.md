@@ -54,8 +54,8 @@ exactly what we want to hear about.
 - **Errors never leak internals:** unexpected errors return a generic 500, and the
   `Authorization` and `Cookie` headers are redacted from the logs.
 - **The Docker images** (the API and the migration job) run as a non-root user, are pinned by
-  digest and get the latest Alpine security fixes. The API image also has no npm, npx or
-  yarn, and no development dependencies.
+  digest and get the latest Alpine security fixes. Neither has npm, npx or yarn, and the API
+  image has no development dependencies.
 
 ## How the code is checked
 

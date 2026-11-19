@@ -21,12 +21,17 @@ RUN npm run build
 # Used by docker compose (service "migrate") and in real deploys
 # before the new API version starts. It needs the Prisma CLI, a dev
 # dependency, so it keeps the build stage's node_modules. It is published
-# too, so it gets the same hardening as the runtime image: the latest
-# Alpine security fixes, and no root user.
+# too, so it gets the same hardening as the runtime image (see stage 4):
+# the latest Alpine security fixes, no npm, npx, corepack or yarn, and no
+# root user. npm bundles its own copies of packages, and those were the
+# only vulnerabilities Trivy found in this image. Without npx, the Prisma
+# CLI is started directly.
 FROM build AS migrate
-RUN apk upgrade --no-cache
+RUN apk upgrade --no-cache \
+  && rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+    /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-*
 USER node
-CMD ["npx", "prisma", "migrate", "deploy"]
+CMD ["/app/node_modules/.bin/prisma", "migrate", "deploy"]
 
 # ---- Stage 3: production dependencies only -----------------------------
 # --omit=optional also drops packages that are only *optional* peers of a
