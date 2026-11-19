@@ -20,7 +20,9 @@ model User {
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  refreshTokens RefreshToken[]
+  refreshTokens   RefreshToken[]
+  memberships     Membership[]
+  invitationsSent Invitation[]   @relation("InvitedBy")
 
   @@map("users")
 }
@@ -42,4 +44,71 @@ model RefreshToken {
   @@index([userId])
   @@index([familyId])
   @@map("refresh_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces (step 4). A workspace is a "tenant": a team's private space.
+// Every project and task added in step 5 will belong to exactly one workspace.
+// ---------------------------------------------------------------------------
+
+// Ordered from most to least powerful. The ranking lives in workspaces.policy.ts.
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model Workspace {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  memberships Membership[]
+  invitations Invitation[]
+
+  @@map("workspaces")
+}
+
+// The join table between users and workspaces, carrying the user's role there.
+// A composite primary key (workspace_id, user_id) makes "member twice" impossible.
+model Membership {
+  workspaceId String        @map("workspace_id") @db.Uuid
+  userId      String        @map("user_id") @db.Uuid
+  role        WorkspaceRole @default(MEMBER)
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  // Deleting a workspace removes its memberships.
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // Restrict: the database refuses to delete a user who still belongs to a
+  // workspace, so an account deletion can never silently leave a team ownerless.
+  user      User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  // The primary key already indexes workspace_id first; this one makes
+  // "which workspaces is this user in?" fast too.
+  @@id([workspaceId, userId])
+  @@index([userId])
+  @@map("memberships")
+}
+
+model Invitation {
+  id          String        @id @default(uuid()) @db.Uuid
+  workspaceId String        @map("workspace_id") @db.Uuid
+  // Lowercased, like users.email, so matching is case-insensitive.
+  email       String
+  role        WorkspaceRole
+  // Like refresh tokens: only the SHA-256 hash of the secret token is stored.
+  tokenHash   String        @unique @map("token_hash")
+  invitedById String?       @map("invited_by_id") @db.Uuid
+  expiresAt   DateTime      @map("expires_at")
+  acceptedAt  DateTime?     @map("accepted_at")
+  revokedAt   DateTime?     @map("revoked_at")
+  createdAt   DateTime      @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invitedBy User?     @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, email])
+  @@map("invitations")
 }

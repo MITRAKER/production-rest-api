@@ -1,0 +1,142 @@
+# Publishes a release when a version tag like v1.2.0 is pushed
+# (see "Releasing" in CONTRIBUTING.md):
+#   1. checks that the tag matches package.json and CHANGELOG.md,
+#   2. reruns the whole CI pipeline on the tagged commit,
+#   3. pushes the API and migration images to GitHub Container Registry,
+#   4. creates the GitHub release with the notes from CHANGELOG.md.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Tag matches package.json and CHANGELOG.md
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      notes: ${{ steps.version.outputs.notes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "::error::Tag $TAG does not match the version in package.json ($PACKAGE_VERSION)"
+            exit 1
+          fi
+          node scripts/changelog-section.mjs "$VERSION" > release-notes.md
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # A multi-line output needs a delimiter that can't appear in the notes.
+          DELIMITER="NOTES_$(openssl rand -hex 16)"
+          {
+            echo "notes<<$DELIMITER"
+            cat release-notes.md
+            echo "$DELIMITER"
+          } >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: CI
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  images:
+    name: Publish Docker images
+    needs: [verify, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to GitHub Container Registry
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Image names (registries require lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: api-meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      # Provenance says how and where the image was built; the SBOM lists
+      # every package inside it. Both are attached to the image, unsigned
+      # (see LEARNING.md chapter 3, "Releases").
+      - name: Build and push the API image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: runtime
+          push: true
+          tags: ${{ steps.api-meta.outputs.tags }}
+          labels: ${{ steps.api-meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+
+      - id: migrate-meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}-migrate
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Build and push the migration image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: migrate
+          push: true
+          tags: ${{ steps.migrate-meta.outputs.tags }}
+          labels: ${{ steps.migrate-meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+
+  # The only job that can write to the repository. It runs no action and no
+  # code from the repository, only the GitHub CLI that comes with the runner
+  # (the notes were prepared by the read-only verify job), so no third-party
+  # code ever holds its token.
+  github-release:
+    name: GitHub release
+    needs: [verify, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # create the release
+    steps:
+      - name: Create the release with the notes from CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          NOTES: ${{ needs.verify.outputs.notes }}
+        run: |
+          printf '%s\n' "$NOTES" > release-notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file release-notes.md --verify-tag

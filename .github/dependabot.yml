@@ -1,0 +1,56 @@
+# Dependabot opens pull requests to keep dependencies, GitHub Actions and the
+# Docker base image up to date. CI checks each one like any other pull request.
+# Commit messages follow Conventional Commits: build(deps): ..., ci(deps): ...
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: build
+      prefix-development: build
+      include: scope
+    # Minor and patch updates arrive as two pull requests a week instead of dozens.
+    groups:
+      production-dependencies:
+        dependency-type: production
+        update-types: [minor, patch]
+      development-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+    ignore:
+      # typescript-eslint supports TypeScript below 6.1: upgrade both together, by hand.
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
+      # The Node.js types must match the Node.js version we run (.nvmrc, Dockerfile).
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      github-actions:
+        patterns: ['*']
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: build
+      include: scope
+    ignore:
+      # Move to the next Node.js LTS line deliberately, together with .nvmrc.
+      - dependency-name: node
+        update-types: ['version-update:semver-major']
