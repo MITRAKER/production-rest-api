@@ -12,6 +12,8 @@ import usersRoutes from './modules/users/users.routes.js';
 import workspacesRoutes from './modules/workspaces/workspaces.routes.js';
 import membersRoutes from './modules/workspaces/members.routes.js';
 import invitationsRoutes from './modules/invitations/invitations.routes.js';
+import projectsRoutes from './modules/projects/projects.routes.js';
+import tasksRoutes from './modules/tasks/tasks.routes.js';
 
 /** Pretty, colored logs for humans in development; JSON lines everywhere else. */
 export function loggerOptions(env: Pick<Env, 'NODE_ENV' | 'LOG_LEVEL'>) {
@@ -80,6 +82,14 @@ export async function buildApp(env: Env): Promise<FastifyInstance> {
     maxPendingInvitations: env.MAX_PENDING_INVITATIONS,
     maxMembersPerWorkspace: env.MAX_MEMBERS_PER_WORKSPACE,
     maxWorkspacesPerUser: env.MAX_WORKSPACES_PER_USER,
+  });
+  await app.register(projectsRoutes, {
+    prefix: '/workspaces',
+    maxProjectsPerWorkspace: env.MAX_PROJECTS_PER_WORKSPACE,
+  });
+  await app.register(tasksRoutes, {
+    prefix: '/workspaces',
+    maxTasksPerProject: env.MAX_TASKS_PER_PROJECT,
   });
 
   return app;

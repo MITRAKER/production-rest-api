@@ -46,6 +46,24 @@ export async function lockWorkspace(tx: Prisma.TransactionClient, workspaceId: s
 }
 
 /**
+ * The shared version of lockWorkspace(), for writes INSIDE a workspace
+ * (projects and tasks).
+ *
+ * Any number of transactions can hold this lock at once, so task edits don't
+ * wait for each other. But it conflicts with lockWorkspace(): while one is
+ * held, nobody's membership or role can change. That keeps true, until we
+ * commit, what we checked at the start: that the caller is still a member
+ * with the right role, and that a new assignee is still a member.
+ *
+ * Lock order: the workspace first, then a project (lockProject), then users.
+ */
+export async function lockWorkspaceShared(tx: Prisma.TransactionClient, workspaceId: string) {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id FROM workspaces WHERE id = ${workspaceId}::uuid FOR SHARE`;
+  if (rows.length === 0) throw Errors.notFound('Workspace');
+}
+
+/**
  * Throws LIMIT_REACHED if the user already belongs to `max` workspaces.
  * Call it under lockUser() (src/lib/locks.ts), so two simultaneous requests
  * can't both pass the "fewer than the maximum" check (the same race as the

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import * as authSchemas from '../src/modules/auth/auth.schemas.js';
 import * as invitationSchemas from '../src/modules/invitations/invitations.schemas.js';
+import * as projectSchemas from '../src/modules/projects/projects.schemas.js';
+import * as taskSchemas from '../src/modules/tasks/tasks.schemas.js';
 import * as workspaceSchemas from '../src/modules/workspaces/workspaces.schemas.js';
 
 /**
@@ -16,12 +18,14 @@ const modules: Record<string, Record<string, unknown>> = {
   auth: authSchemas,
   workspaces: workspaceSchemas,
   invitations: invitationSchemas,
+  projects: projectSchemas,
+  tasks: taskSchemas,
 };
 
 type JsonNode = Record<string, unknown>;
 
-/** Strings of these formats have a fixed, short length. */
-const FIXED_LENGTH_FORMATS = new Set(['uuid']);
+/** Strings of these formats have a fixed, short length ("date" is YYYY-MM-DD). */
+const FIXED_LENGTH_FORMATS = new Set(['uuid', 'date']);
 const MAX_NODES = 10_000;
 
 function isObject(value: unknown): value is JsonNode {

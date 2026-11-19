@@ -23,6 +23,9 @@ model User {
   refreshTokens   RefreshToken[]
   memberships     Membership[]
   invitationsSent Invitation[]   @relation("InvitedBy")
+  projectsCreated Project[]      @relation("ProjectCreatedBy")
+  tasksCreated    Task[]         @relation("TaskCreatedBy")
+  tasksAssigned   Task[]         @relation("TaskAssignee")
 
   @@map("users")
 }
@@ -66,6 +69,7 @@ model Workspace {
 
   memberships Membership[]
   invitations Invitation[]
+  projects    Project[]
 
   @@map("workspaces")
 }
@@ -111,4 +115,78 @@ model Invitation {
 
   @@index([workspaceId, email])
   @@map("invitations")
+}
+
+// ---------------------------------------------------------------------------
+// Projects and tasks (step 5). Both live inside a workspace: every query
+// that reads or writes them is scoped by workspace_id (see LEARNING.md,
+// chapter 5).
+// ---------------------------------------------------------------------------
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Project {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @map("workspace_id") @db.Uuid
+  name        String
+  description String   @default("")
+  createdById String?  @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Deleting a workspace deletes its projects, and their tasks with them.
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation("ProjectCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  tasks     Task[]
+
+  // Lets a task reference "this project, in this workspace" as one key.
+  @@unique([id, workspaceId])
+  // The project list is ordered by creation time, with the id as tiebreaker.
+  @@index([workspaceId, createdAt, id])
+  @@map("projects")
+}
+
+model Task {
+  id          String       @id @default(uuid()) @db.Uuid
+  // Copied from the project on purpose ("denormalized"): it lets every task
+  // query be scoped by workspace directly, and lets removing a member
+  // unassign all their tasks in that workspace with one indexed update.
+  workspaceId String       @map("workspace_id") @db.Uuid
+  projectId   String       @map("project_id") @db.Uuid
+  title       String
+  description String       @default("")
+  status      TaskStatus   @default(TODO)
+  priority    TaskPriority @default(MEDIUM)
+  // A calendar date, not a moment in time: no hours, no time zone.
+  dueDate     DateTime?    @map("due_date") @db.Date
+  assigneeId  String?      @map("assignee_id") @db.Uuid
+  createdById String?      @map("created_by_id") @db.Uuid
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  // The foreign key covers BOTH columns: (project_id, workspace_id) must be
+  // an existing project in that workspace. So the database itself guarantees
+  // that the copied workspace_id is right. Deleting a project (or its
+  // workspace, which deletes its projects) deletes its tasks.
+  project   Project @relation(fields: [projectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  assignee  User?   @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  createdBy User?   @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  // One index per way the list can be sorted (always within one project,
+  // with the id as tiebreaker), plus one for "tasks assigned to this member".
+  @@index([projectId, createdAt, id])
+  @@index([projectId, updatedAt, id])
+  @@index([projectId, dueDate, id])
+  @@index([workspaceId, assigneeId])
+  @@map("tasks")
 }

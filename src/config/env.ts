@@ -27,14 +27,18 @@ const EnvSchema = z.object({
   // How long an invitation link stays valid (bounded: Power of Ten rule 3).
   INVITATION_TTL_DAYS: z.coerce.number().int().min(1).max(30).default(7),
 
-  // Quotas (Power of Ten rule 3): how much a user can have at once
-  // (workspaces, members, pending invitations). Each one is itself capped by
-  // LIMITS.listMax, so every list the API returns stays bounded too. Old rows,
-  // like revoked or used invitations, still accumulate: LEARNING.md chapter 4
-  // (Rule 3) explains the cleanup this will need.
+  // Quotas (Power of Ten rule 3): how much can exist at once (workspaces per
+  // user; members, pending invitations and projects per workspace; tasks per
+  // project). Each one has its own upper bound, so every list the API returns
+  // stays bounded too. Old rows, like revoked or used invitations, still
+  // accumulate: LEARNING.md chapter 4 (Rule 3) explains the cleanup this will
+  // need.
   MAX_WORKSPACES_PER_USER: z.coerce.number().int().min(1).max(LIMITS.listMax).default(50),
   MAX_MEMBERS_PER_WORKSPACE: z.coerce.number().int().min(1).max(LIMITS.listMax).default(200),
   MAX_PENDING_INVITATIONS: z.coerce.number().int().min(1).max(LIMITS.listMax).default(50),
+  MAX_PROJECTS_PER_WORKSPACE: z.coerce.number().int().min(1).max(LIMITS.listMax).default(100),
+  // Task lists are paginated, so this quota may go above LIMITS.listMax.
+  MAX_TASKS_PER_PROJECT: z.coerce.number().int().min(1).max(LIMITS.taskQuotaMax).default(5_000),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

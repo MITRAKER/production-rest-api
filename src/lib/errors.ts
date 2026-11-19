@@ -43,6 +43,14 @@ export const Errors = {
   limitReached: (message: string) => new AppError(409, 'LIMIT_REACHED', message),
   invitationExpired: () =>
     new AppError(410, 'INVITATION_EXPIRED', 'This invitation has expired or was already used'),
+  invalidCursor: () =>
+    new AppError(
+      400,
+      'INVALID_CURSOR',
+      'The cursor is invalid or belongs to a different sort order. Start again from the first page.',
+    ),
+  assigneeNotMember: () =>
+    new AppError(400, 'ASSIGNEE_NOT_MEMBER', 'Tasks can only be assigned to workspace members'),
   invitationEmailMismatch: () =>
     new AppError(
       403,

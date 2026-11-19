@@ -95,6 +95,13 @@ export class MemberService {
       await tx.membership.delete({
         where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
       });
+      // Tasks are only ever assigned to members: whoever leaves (or is
+      // removed) is taken off their tasks in this workspace, in the same
+      // transaction. The (workspace_id, assignee_id) index finds them.
+      await tx.task.updateMany({
+        where: { workspaceId, assigneeId: targetUserId },
+        data: { assigneeId: null },
+      });
       await checkWorkspaceHasOwner(tx, workspaceId);
     });
   }
