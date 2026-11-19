@@ -1,6 +1,6 @@
 import fp from 'fastify-plugin';
 import jwt from '@fastify/jwt';
-import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyRequest } from 'fastify';
 import { Errors } from '../lib/errors.js';
 
 declare module '@fastify/jwt' {
@@ -14,7 +14,7 @@ declare module '@fastify/jwt' {
 declare module 'fastify' {
   interface FastifyInstance {
     /** Use as a preHandler on any route that requires a logged-in user. */
-    authenticate: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+    authenticate: (request: FastifyRequest) => Promise<void>;
   }
 }
 

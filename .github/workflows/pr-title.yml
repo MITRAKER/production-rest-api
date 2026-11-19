@@ -1,0 +1,41 @@
+# Checks that the pull request title follows Conventional Commits.
+# It is its own workflow because it must run again when the title is
+# edited ("edited"), and the CI jobs don't need to. Re-running an old run
+# wouldn't help: it would check the title the run started with.
+name: Pull request title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # Git hooks are for developers' machines, not for CI.
+  HUSKY: 0
+
+jobs:
+  title:
+    name: Pull request title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Untrusted text (the title) goes through an environment variable,
+      # never straight into the script: that would allow script injection.
+      - name: Title follows Conventional Commits
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE" | npx --no -- commitlint --verbose

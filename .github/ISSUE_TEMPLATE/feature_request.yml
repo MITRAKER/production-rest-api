@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest a new endpoint or an improvement.
+title: 'feat: '
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the need first, before any solution. "As a workspace admin, I want to..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Endpoints, request and response shapes, who is allowed to call them, and the error cases.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered

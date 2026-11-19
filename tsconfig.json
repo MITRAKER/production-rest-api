@@ -1,17 +1,44 @@
 {
+  // Used by your editor and `npm run typecheck`: covers the app, the tests,
+  // and the JavaScript config files. `npm run build` uses tsconfig.build.json,
+  // which compiles only src/.
+  //
+  // Power of Ten rule 10: every check the compiler offers is switched on.
   "compilerOptions": {
     "target": "ES2023",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2023"],
     "types": ["node"],
-    "outDir": "dist",
-    "rootDir": "src",
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUncheckedSideEffectImports": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true
   },
-  "include": ["src"]
+  "include": [
+    "src",
+    "test",
+    "scripts",
+    "eslint-rules",
+    "eslint.config.js",
+    "commitlint.config.js",
+    "vitest.config.ts",
+    "prisma.config.ts"
+  ]
 }
