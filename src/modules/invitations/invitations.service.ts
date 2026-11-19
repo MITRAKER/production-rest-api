@@ -142,8 +142,10 @@ export class InvitationService {
       throw Errors.invitationExpired();
     }
 
-    // The token alone isn't enough: you must be logged in as the
-    // person it was sent to. A leaked link is useless to anyone else.
+    // The token alone isn't enough: you must be logged in with the invited
+    // email. That protects invitees who already have an account. Sign-up
+    // doesn't verify emails yet, so for an invitee without one, whoever holds
+    // the link can register that email first (SECURITY.md, known limitations).
     const user = await tx.user.findUnique({ where: { id: userId } });
     if (user === null) throw Errors.unauthorized();
     if (user.email !== invitation.email) throw Errors.invitationEmailMismatch();

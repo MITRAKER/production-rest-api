@@ -1096,8 +1096,10 @@ Open `workspaces.policy.ts`. The entire permission model is a small table:
 | change roles, delete workspace                       | OWNER        |
 
 plus one more rule, `outranks(actor, target)`: **you can only act on people (or invitations)
-with a lower role than yours.** So an admin can remove a member but not another admin or an
-owner, and can invite members but not admins.
+with a lower role than yours, or on yourself.** So an admin can remove a member but not another
+admin or an owner, and can invite members but not admins. An owner can change the role of
+admins and members, but not of another owner: co-owners are equals. The only way an owner
+stops being one is their own choice, stepping down or leaving, and never as the last owner.
 
 Why put this in one file instead of `if (role === 'ADMIN')` checks in each route?
 
@@ -1155,8 +1157,8 @@ Bob's request:   count owners = 2 ✓ ......... delete Bob        → zero owner
 
 Each check was true when it ran, but by the time each acted, the world had changed. This
 bug class is called **TOCTOU** (time-of-check to time-of-use), and it's real: the test
-"keeps one owner even when two owners leave at the same instant" fails reliably if you
-remove the fix.
+"keeps one owner even when two owners leave at the same instant" fails every time if you
+remove the fix (with the warm connection pool from chapter 3; see Concept 12).
 
 **The fix: a transaction plus a row lock.** Every operation that changes membership runs
 inside `prisma.$transaction(...)` and first does:
@@ -1172,14 +1174,18 @@ owners _after_ the first has finished.
 
 Two details matter:
 
-1. **Lock first, then read.** We re-read the caller's own role _after_ taking the lock.
-   In the "two owners demote each other" test, the second request discovers its caller was
-   just demoted and gets 403.
+1. **Lock first, then read.** Everything the decision depends on is read _after_ taking the
+   lock. In the "two owners step down at the same instant" test, the second request counts
+   the owners after the first one has committed, finds its caller is now the last owner, and
+   gets 409. The caller's own role is re-read the same way: if Alice demotes Bob while Bob is
+   removing Carol, Bob's request either finishes first or sees that he is no longer an admin.
 2. We lock the **parent** (workspace) row, not the membership rows, because "how many
    owners are there?" is a question about a _set_ of rows, including rows that might be
    inserted. Locking one parent row is the simplest way to serialize changes to that set.
 
-We only lock where an invariant is at stake. Renaming a workspace doesn't need it.
+Even renaming takes the lock. Without it, a rename could pass its permission check, then wait
+for a delete that was already running, and find no row left to update: a 500 instead of a 404. The test "answers 404, never 500, when a rename races a delete" covers it. Reads don't
+lock: they can't break an invariant.
 
 ### Concept 7: Invitations
 
@@ -1190,19 +1196,21 @@ Inviting is the most security-sensitive feature here, so it combines several ear
 - **Shown once.** The token appears only in the response to the inviter (like an API key).
   A real product would email a link; we return it so the inviter can share it.
 - **Bound to an email.** Accepting needs the token _and_ being logged in with the invited
-  email. A leaked link is useless to anyone else, and a mismatch doesn't burn the
-  invitation (the "different account" test).
-- **Expires** after `INVITATION_TTL_DAYS` (7), and **single-use**, enforced with the same
-  conditional-update trick as refresh token rotation, so two simultaneous accepts can't
-  both succeed.
+  email. If the invitee already has an account, a leaked link is useless to anyone else, and
+  a mismatch doesn't burn the invitation (the "different account" test).
+- **Expires** after `INVITATION_TTL_DAYS` (7), and **single-use**: accepting runs under the
+  workspace lock and marks the invitation used with the same conditional-update trick as
+  refresh token rotation, so two simultaneous accepts can't both succeed.
 - **OWNER can't be invited.** That's a rule about the input's _shape_, so the Zod schema
   rejects it with 400. Ownership only comes from an existing owner promoting a member.
 - **One pending invitation per email.** Revoke the old one before sending a new one.
 
-> **A known gap, on purpose:** we don't verify email addresses at sign-up. Someone could
-> register as `erin@example.com` without owning that inbox. Together with the token they'd
-> still need, this is a low risk here, but a real product would verify emails first
-> (Exercise 4).
+> **A known gap, on purpose:** we don't verify email addresses at sign-up, so anyone can
+> register as `erin@example.com` without owning that inbox. If Erin has no account yet,
+> whoever gets her invitation link can register her email first, accept, and join with the
+> invited role, even ADMIN, and Erin can no longer sign up. So until emails are verified,
+> the link itself is the secret: share it only with the person invited, like a password. A
+> real product would verify emails before accepting (Exercise 4).
 
 ### Concept 8: Atomic nested writes
 
@@ -1243,8 +1251,9 @@ Dave gets **404**. Then we test the invariants (last owner, IDOR, simultaneous r
 
 This is the first feature built under the rules from chapter 3, and they shaped it:
 
-**Rule 3: quotas.** Without limits, one script could create a million workspaces or
-invitations, and `GET /workspaces` would try to return all of them in one response. So:
+**Rule 3: quotas.** Without limits, one script could create a million workspaces or fill a
+workspace with a million pending invitations, and `GET /workspaces` would try to return all
+of them in one response. So:
 
 | Quota                              | Default | Setting                     |
 | ---------------------------------- | ------- | --------------------------- |
@@ -1256,29 +1265,41 @@ Going over a quota returns `409 LIMIT_REACHED`. Each setting is itself capped at
 `LIMITS.listMax` (1,000), and every list query has a `take:` with the quota, so no list the
 API returns can ever be unbounded. Step 5 adds pagination for lists that need to be longer.
 
+The quotas bound what exists _at once_, not **history**. Revoked, expired and accepted
+invitations stay in the table, like old refresh tokens (chapter 3), so an admin who invites
+and revokes in a loop still adds rows. A scheduled cleanup (chapter 3, Exercise 8) and a rate
+limit on inviting would close that.
+
 **A quota check is a race, too.** It's the same time-of-check to time-of-use problem as the
 last owner: two "create workspace" requests could both count 49 workspaces, and both insert.
 So `create()` locks the user's row before counting, and accepting an invitation locks the
 workspace and then the user. Always in that order: if one transaction locked A then B while
 another locked B then A, each would wait for the other forever (a **deadlock**). Postgres
 detects deadlocks and aborts one of the transactions, but a fixed lock order means they
-can't happen at all. Two tests fire simultaneous requests at the last free slot and check
-that exactly one wins.
+can't happen at all. Race tests fire simultaneous requests at the last free slot (a
+workspace, a seat, a pending invitation) and check that exactly one wins.
 
-Race tests have a trap, and we fell into it. The first version of the "creations at the same
-instant" test passed even with the lock removed! The first request reused an idle database
-connection, while the others had to open new ones, which took long enough for the first
-request to finish before the others started. The race never happened. The fix:
-`warmUpPool()` opens several connections before the race, and now the test fails without
-the lock (five workspaces created instead of one) and passes with it. **Always check that a
-race test fails without the fix**, or it proves nothing.
+Race tests have a trap (chapter 3, Concept 4), and we fell into it here too. The first
+version of the "creations at the same instant" test passed even with the lock removed! The
+first request reused an idle database connection, while the others had to open new ones,
+which took long enough for the first request to finish before the others started. The race
+never happened. Now every race test calls `warmUpPool()` first, and each was checked both
+ways: it fails without its lock and passes with it. One race is lost only most of the time
+without the lock (inviting runs several queries before it counts), so that test runs it three
+times. **Always check that a race test fails without the fix**, or it proves nothing.
 
 **Rule 5: preconditions and post-conditions.** `assertAnotherOwnerExists()` is a
 **precondition**: it refuses a request that would remove the last owner, with
 `409 LAST_OWNER`, because that's the user's mistake. After the change,
 `checkWorkspaceHasOwner()` checks the **post-condition** with `invariant()`: the workspace
 still has an owner. If that ever fails, the precondition has a bug, so the transaction rolls
-back and the client gets a 500. Even a future bug can't leave a workspace without an owner.
+back and the client gets a 500.
+
+A post-condition only sees its own transaction, though, so it can't replace the lock. We
+removed the lock and made two owners step down at once: each transaction counted the other
+owner (whose change it couldn't see yet), both passed the check, and the workspace was left
+with no owner in most runs. **Locks prevent races; assertions catch logic bugs.** A new
+endpoint that changes members must take the lock too.
 
 **Rule 4: small functions.** The routes plugin had grown to 70 lines, so members got their own
 plugin and service (`members.routes.ts`, `members.service.ts`), and `accept()` is split into
@@ -1286,6 +1307,22 @@ small private steps, each with one job.
 
 **Rule 7: say what you mean.** Every "not found" check is an explicit `=== null`, and
 `test/input-bounds.test.ts` now checks the workspace and invitation schemas too.
+
+### What the review found
+
+Before this step was merged, an independent review tried to break it. It found real
+problems, and all of them are fixed now:
+
+| Problem found                                                                    | Fix                                                                                 |
+| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| An owner could demote a co-owner, and then remove them                           | Role changes follow the same rule as removal: only lower roles, or yourself         |
+| Renaming a workspace while it was being deleted answered 500                     | The rename takes the workspace lock first, so it answers 200 or 404                 |
+| Some race tests still passed with their locks removed                            | Every race test warms up the pool and was checked to fail without its fix           |
+| Inviting had no race test, and three endpoints had no 403 or 404 test            | New tests for both, so every endpoint is covered for each role                      |
+| The docs promised too much (a leaked link, the post-condition, unbounded growth) | Corrected in Concepts 7 and 12, and listed in `SECURITY.md` under known limitations |
+
+All the tests passed before these fixes: tests only check what someone thought of. A
+reviewer who sets out to break the code finds the rest. That is what reviews are for.
 
 ### Build it yourself
 
@@ -1295,8 +1332,9 @@ small private steps, each with one job.
 4. Add `GET /workspaces/:id` and write the "outsider gets the same 404 as a missing id"
    test.
 5. Add member role changes and removal with the "last owner" check, _without_ the lock.
-   Write the "two owners leave at the same instant" test and watch it fail. Then add the
-   transaction and `FOR UPDATE`, and watch it pass.
+   Write the "two owners leave at the same instant" test, with `warmUpPool()` before the
+   `Promise.all`, and watch it fail. Then add the transaction and `FOR UPDATE`, and watch it
+   pass.
 6. Add invitations: create (token once, hash stored), accept (email must match), revoke
    (scoped by workspace: write the IDOR test).
 7. Add the quotas. Write the "two creations at the same instant" test first, watch it fail
