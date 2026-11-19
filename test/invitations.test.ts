@@ -2,7 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { hashToken } from '../src/lib/tokens.js';
-import { buildTestApp, client, createTeam, invite, resetDb, signUp } from './helpers.js';
+import {
+  buildTestApp,
+  client,
+  createTeam,
+  invite,
+  resetDb,
+  signUp,
+  warmUpPool,
+} from './helpers.js';
 
 let app: FastifyInstance;
 
@@ -99,6 +107,24 @@ describe('POST /workspaces/:workspaceId/invitations', () => {
   });
 });
 
+describe('POST /workspaces/:workspaceId/invitations (at the same instant)', () => {
+  it('creates only one pending invitation per email', async () => {
+    const team = await createTeam(app);
+
+    // Without the workspace lock, each request could check "no pending
+    // invitation for erin" before any of them inserts one.
+    await warmUpPool(app);
+    const results = await Promise.all(
+      [1, 2, 3, 4, 5].map(() =>
+        team.owner.api.post(`${team.url}/invitations`, { email: 'erin@example.com' }),
+      ),
+    );
+    const codes = results.map((r) => r.statusCode).sort((a, b) => a - b);
+    expect(codes).toEqual([201, 409, 409, 409, 409]);
+    expect(await app.prisma.invitation.count({ where: { email: 'erin@example.com' } })).toBe(1);
+  });
+});
+
 describe('GET /workspaces/:workspaceId/invitations', () => {
   it('lists only pending invitations, for admins and owners', async () => {
     const team = await createTeam(app);
@@ -132,6 +158,22 @@ describe('DELETE /workspaces/:workspaceId/invitations/:invitationId', () => {
     ).toBe(204);
     const accept = await erin.api.post('/invitations/accept', { token });
     expect(accept.statusCode).toBe(404);
+  });
+
+  it('forbids members (403) and hides the workspace from outsiders (404)', async () => {
+    const team = await createTeam(app);
+    const { invitation } = await invite(team.owner.api, team.workspaceId, 'erin@example.com');
+    const url = `${team.url}/invitations/${invitation.id}`;
+
+    const byMember = await team.member.api.delete(url);
+    expect(byMember.statusCode).toBe(403);
+    expect(byMember.json().error.code).toBe('FORBIDDEN');
+    const byOutsider = await team.outsider.api.delete(url);
+    expect(byOutsider.statusCode).toBe(404);
+    expect(byOutsider.json().error.code).toBe('NOT_FOUND');
+
+    const row = await app.prisma.invitation.findUniqueOrThrow({ where: { id: invitation.id } });
+    expect(row.revokedAt).toBeNull();
   });
 
   it("doesn't let an admin revoke an invitation for a role equal to theirs", async () => {
@@ -263,10 +305,14 @@ describe('POST /invitations/accept', () => {
     const erin = await signUp(app, 'Erin');
     const { token } = await invite(team.owner.api, team.workspaceId, erin.email);
 
+    await warmUpPool(app);
     const results = await Promise.all([
       erin.api.post('/invitations/accept', { token }),
       erin.api.post('/invitations/accept', { token }),
     ]);
+    // Under the lock, the second request re-reads the invitation, sees it was
+    // just used, and answers 410. The conditional update and the primary key
+    // on memberships are the backstops if the lock were ever missing.
     expect(results.map((r) => r.statusCode).sort((a, b) => a - b)).toEqual([200, 410]);
     const memberships = await app.prisma.membership.count({ where: { userId: erin.id } });
     expect(memberships).toBe(1);

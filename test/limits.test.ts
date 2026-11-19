@@ -3,8 +3,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildTestApp, invite, resetDb, signUp, warmUpPool } from './helpers.js';
 
 /**
- * Power of Ten rule 3: nothing a user creates grows without limit.
- * The quotas are environment variables, so the tests can use tiny ones.
+ * Power of Ten rule 3: what a user can have at once (workspaces, members,
+ * pending invitations) is bounded. The quotas are environment variables, so
+ * the tests can use tiny ones.
  */
 let app: FastifyInstance;
 
@@ -81,6 +82,33 @@ describe('pending invitations per workspace', () => {
 
     await alice.api.delete(`${url}/${invitation.id}`);
     expect((await alice.api.post(url, { email: 'dave@example.com' })).statusCode).toBe(201);
+  });
+
+  it('holds when several invitations arrive at the same instant', async () => {
+    const alice = await signUp(app, 'Alice');
+    const workspaceId = await createWorkspace(alice.api, 'Acme');
+    const url = `/workspaces/${workspaceId}/invitations`;
+
+    // Without the lock, this race is lost only most of the time (inviting
+    // runs several queries before it counts), so the test runs it three times.
+    for (const round of [1, 2, 3]) {
+      // Revoke everything, then take one of the two slots.
+      await app.prisma.invitation.updateMany({
+        where: { workspaceId },
+        data: { revokedAt: new Date() },
+      });
+      await invite(alice.api, workspaceId, `bob${String(round)}@example.com`);
+
+      await warmUpPool(app);
+      // One slot left, five requests (to five different people) racing for it.
+      const emails = ['carol', 'dave', 'erin', 'frank', 'grace'].map(
+        (name) => `${name}${String(round)}@example.com`,
+      );
+      const results = await Promise.all(emails.map((email) => alice.api.post(url, { email })));
+      const codes = results.map((r) => r.statusCode).sort((a, b) => a - b);
+      expect(codes).toEqual([201, 409, 409, 409, 409]);
+    }
+    expect(await app.prisma.invitation.count({ where: { workspaceId } })).toBe(6);
   });
 });
 
