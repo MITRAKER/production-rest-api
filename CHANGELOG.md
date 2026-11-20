@@ -20,6 +20,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lower role than yours, row locks keep at least one owner in every workspace, and quotas
   limit workspaces per user, members per workspace and pending invitations
   (`409 LIMIT_REACHED`).
+- Projects and tasks inside workspaces. Admins manage projects; every member reads, creates
+  and edits tasks, and deletes the ones they created (admins can delete any). A task has a
+  status, a priority, an optional due date and an optional assignee, who must be a member:
+  removing a member unassigns their tasks. Lists use keyset (cursor) pagination with
+  opaque cursors, filters (status, priority, assignee, due date range, title search) and
+  sorting (by creation, last update or due date, with undated tasks last). New quotas limit
+  projects per workspace and tasks per project.
 - Quality gates: the strictest TypeScript settings, ESLint with the NASA/JPL "Power of Ten"
   rules (including a custom rule that bans recursion), Prettier, Git hooks (Husky,
   lint-staged, commitlint) and a test coverage threshold.
@@ -38,6 +45,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asserts that a session has exactly one live token.
 - Logging out, or reusing an old refresh token, ends the session even while one of its
   tokens is being rotated: rotation and revocation lock the user's row first.
+- Project and task lookups are scoped by every id in the URL, project and task writes hold a
+  shared lock on the workspace so roles and memberships can't change halfway through, and
+  pagination cursors are validated like any other input, including the dates inside them.
+  Title search escapes `LIKE` wildcards.
 - Both Docker images are pinned by digest, run on Node.js 26 LTS as a non-root user and get
   the latest Alpine security fixes. Neither ships npm, and the API image leaves out the
   Prisma CLI.

@@ -10,7 +10,7 @@ can rebuild it yourself without looking.
 | 2       | Authentication: register, login, refresh tokens, logout             | ✅     |
 | 3       | Professional quality: CI/CD, security scanning, NASA/JPL code rules | ✅     |
 | 4       | Workspaces, members, invitations and role-based permissions         | ✅     |
-| 5       | Projects and tasks: pagination, filtering, sorting                  | ⏳     |
+| 5       | Projects and tasks: pagination, filtering, sorting                  | ✅     |
 | 6       | Error format, logging, OpenAPI docs                                 | ⏳     |
 | 7       | Seed data and a recruiter-ready README                              | ⏳     |
 
@@ -1234,9 +1234,10 @@ sends is input: body, query string, headers, _and_ the URL path.
 
 ### Concept 10: List responses use an envelope
 
-`GET /workspaces` returns `{ "data": [ … ] }`, not a bare array. In step 5 we'll add
-pagination (`{ "data": [...], "nextCursor": "…" }`). With an envelope that's a new field;
-with a bare array it would be a breaking change for every client.
+`GET /workspaces` returns `{ "data": [ … ] }`, not a bare array. Chapter 5 adds
+pagination to the project and task lists as `{ "data": [...], "nextCursor": "…" }`. With an
+envelope that's a new field; with a bare array it would have been a breaking change for
+every client.
 
 ### Concept 11: Testing authorization
 
@@ -1370,3 +1371,506 @@ key · ON DELETE CASCADE / RESTRICT / SET NULL · RBAC · least privilege · pol
 IDOR / BOLA · invariant · race condition · TOCTOU · transaction · row lock (`FOR UPDATE`) ·
 serialization · conditional update · nested write · response envelope · quota ·
 lock ordering · deadlock · precondition · post-condition
+
+---
+
+## Chapter 5: Projects and tasks: pagination, filtering, sorting
+
+### What we built
+
+Workspaces now hold the actual work. A workspace has **projects**, and a project has
+**tasks**:
+
+```
+POST   /workspaces/:workspaceId/projects                    create             (ADMIN+)
+GET    /workspaces/:workspaceId/projects                    list, oldest first, a page at a time
+GET    /workspaces/:workspaceId/projects/:projectId         read one
+PATCH  /workspaces/:workspaceId/projects/:projectId         rename, describe   (ADMIN+)
+DELETE /workspaces/:workspaceId/projects/:projectId         delete, tasks too  (ADMIN+)
+
+POST   /workspaces/:workspaceId/projects/:projectId/tasks   create             (any member)
+GET    /workspaces/:workspaceId/projects/:projectId/tasks   filter, sort, a page at a time
+GET    …/tasks/:taskId                                      read one
+PATCH  …/tasks/:taskId                                      edit               (any member)
+DELETE …/tasks/:taskId                                      delete             (its creator, or ADMIN+)
+```
+
+A task has a title, a description, a status (`TODO`, `IN_PROGRESS`, `DONE`), a priority
+(`LOW`, `MEDIUM`, `HIGH`), an optional due date, and an optional assignee, who must be a
+member of the workspace.
+
+The task list is where this chapter's real lessons are:
+
+```
+GET …/tasks?status=TODO,IN_PROGRESS&sort=dueDate&order=asc&limit=2
+
+{
+  "data": [
+    { "id": "…", "title": "Write the README", "status": "TODO", "dueDate": "2026-11-30", … },
+    { "id": "…", "title": "Pick a logo", "status": "IN_PROGRESS", "dueDate": "2026-12-01", … }
+  ],
+  "nextCursor": "eyJzb3J0IjoiZHVlRGF0ZSIsIm9yZGVyIjoiYXNjIiwidmFsdWUiOiIyMDI2LTEyLTAxIiwiaWQiOiIwYjlkNmM0My04YzU1LTRjNGUtOWUwZS03ZjlhM2UwZjJhMTEifQ"
+}
+```
+
+To get the next page, send the same request with `&cursor=<nextCursor>`. When `nextCursor`
+is `null`, there are no more pages.
+
+| Parameter            | Values                                        | Default      |
+| -------------------- | --------------------------------------------- | ------------ |
+| `limit`              | 1 to 100                                      | 20           |
+| `cursor`             | the `nextCursor` of the previous page         | (first page) |
+| `sort`               | `createdAt`, `updatedAt`, `dueDate`           | `createdAt`  |
+| `order`              | `asc`, `desc`                                 | `desc`       |
+| `status`, `priority` | one or more values, separated by commas       | all          |
+| `assigneeId`         | a member's id, or `none` for unassigned tasks | all          |
+| `dueFrom`, `dueTo`   | days like `2026-12-31`, both days included    | none         |
+| `q`                  | text the title contains (case doesn't matter) | none         |
+
+### New files
+
+```
+prisma/migrations/…_projects_and_tasks/migration.sql
+src/lib/pagination.ts                      # cursors, page size, "ask for one more row"
+src/lib/dates.ts                           # calendar dates ("2026-12-31")
+src/modules/projects/projects.access.ts    # requireProject() and lockProject()
+src/modules/projects/…                     # projects: schemas, service, routes
+src/modules/tasks/tasks.schemas.ts         # task bodies, and the filter and sort allow-lists
+src/modules/tasks/tasks.query.ts           # small pure functions that build the list query
+src/modules/tasks/…                        # tasks: service, routes
+test/pagination.test.ts                    # unit tests: cursors, dates, query building (no DB)
+test/projects.test.ts, test/tasks.test.ts  # endpoints, roles, IDOR, races
+test/task-lists.test.ts                    # filters, sorting, and walking through every page
+```
+
+`workspaces.policy.ts` gained three actions, `workspaces.access.ts` a shared lock
+(Concept 11), and removing a member now unassigns their tasks.
+
+### Concept 1: Nested resources stay inside their tenant
+
+A task's URL names its workspace, its project and the task itself, and every lookup uses
+all of those ids:
+
+```ts
+// projects.access.ts: the project must be in THIS workspace
+db.project.findUnique({ where: { id_workspaceId: { id: projectId, workspaceId } } });
+```
+
+A project id from another workspace simply isn't found (404). That's the IDOR defense from
+chapter 4 (Concept 5), one level deeper. The test "never reaches another workspace's
+project through your own workspace" logs in as the owner of one workspace and tries the
+project and task endpoints with a project id from another one.
+
+**Copying `workspace_id` onto tasks.** A task belongs to a project, which belongs to a
+workspace, so `tasks.workspace_id` repeats what `tasks.project_id` already implies. Storing
+a copy like that is called **denormalization**. It lets a query find tasks by workspace
+directly: removing a member unassigns all their tasks in the workspace with one indexed
+update. The usual risk of a copy is that it goes wrong. Here the database rules that out:
+
+```sql
+FOREIGN KEY (project_id, workspace_id) REFERENCES projects (id, workspace_id)
+```
+
+The foreign key covers **both** columns, so a task's pair must match a real project _in
+that workspace_. For that, `projects` needs a unique index on `(id, workspace_id)`
+(`@@unique([id, workspaceId])` in the Prisma schema).
+
+### Concept 2: Why paginate, and why not with OFFSET
+
+A project can hold 5,000 tasks. Returning them all in one response would be slow for the
+server, the network and the client, so lists come one **page** at a time.
+
+The textbook way is **offset pagination**: `?page=126` becomes `LIMIT 20 OFFSET 2500`. It
+has two problems:
+
+1. **It gets slower the further you go.** The database can't jump to row 2,500: it has to
+   find the first 2,500 rows and throw them away. `EXPLAIN ANALYZE` on a project with
+   5,000 tasks:
+
+   ```
+   Limit (actual rows=21)
+     ->  Sort (actual rows=2521)
+           ->  Bitmap Heap Scan on tasks (actual rows=5000)
+   ```
+
+   All 5,000 tasks were read and sorted, to return 21 of them.
+
+2. **Pages shift under you.** If someone adds a task while you're reading page 1,
+   everything moves down one place, and the last task of page 1 shows up again at the top
+   of page 2. If someone deletes one, a task is skipped and you never see it.
+
+**Keyset pagination** (also called **cursor pagination**) asks a different question.
+Instead of "skip 2,500 rows", it asks "give me the rows _after the last one I saw_". If the
+list is sorted by creation time and the last task you received was created at
+`00:41:40`, the next page is the tasks created after that. An index on
+`(project_id, created_at)` finds that spot directly, the way you open a dictionary at "M"
+without reading A to L first. Page 1 and page 126 cost the same. And tasks added or deleted
+elsewhere don't move your position, because the position is a _value_, not a count.
+
+The price: there's no "jump to page 126", only "next page", and the API doesn't return a
+total (counting reads every row, which is exactly what we wanted to avoid). For feeds,
+infinite scrolling and syncing, that's the right trade, and it's how most large APIs
+paginate (Stripe, Slack, and GitHub's GraphQL API, for example).
+
+**Ask for one more row.** To know whether there's a next page, `toPage()` asks the
+database for `limit + 1` rows. If the extra row comes back, a next page exists, and the
+cursor points at the last row actually returned. The extra row itself isn't returned.
+
+### Concept 3: The order must be total: add the id as a tiebreaker
+
+"The tasks created after 00:41:40" breaks as soon as two tasks share a `createdAt`.
+Timestamps tie more often than you'd think: a bulk import, or two requests in the same
+millisecond. If the order of tied rows isn't defined, the database may return them in any
+order, so a page boundary that falls inside a tie can skip or repeat tasks.
+
+The fix: sort by `createdAt` **and then by `id`**. No two tasks share an id, so the order is
+**total**: every task has exactly one place in it. The cursor stores both values, and
+"after" means:
+
+```
+createdAt > v  OR  (createdAt = v AND id > lastId)
+```
+
+The paging tests insert three tasks with the same `createdAt` on purpose, then walk the list
+with page sizes 1, 2, 3, 4, 7 and 10, so that page boundaries fall inside the tie. Every
+walk must return every task exactly once, in the expected order. Without the tiebreaker,
+the test fails.
+
+### Concept 4: Write the condition so the index can use it
+
+The condition above is correct, but Postgres can't use the index well with it. Here it is
+halfway through a list of 5,000 tasks:
+
+```
+Index Only Scan using tasks_project_id_created_at_id_idx on tasks (actual rows=21)
+  Index Cond: (project_id = '…')
+  Filter: ((created_at > '…') OR ((created_at = '…') AND (id > '…')))
+  Rows Removed by Filter: 2500
+```
+
+One index scan reads one continuous stretch of the index, and an `OR` of two conditions
+isn't one stretch. So Postgres read the project's tasks from the beginning and threw away
+the first 2,500: as slow as `OFFSET`. Our code writes the same condition differently:
+
+```
+createdAt >= v  AND  (createdAt > v OR id > lastId)
+```
+
+It selects exactly the same rows. (Check it: a row with `createdAt > v` passes both forms;
+a row with `createdAt = v` passes both only if `id > lastId`; an earlier row fails both.)
+But its first half is a place Postgres can start reading from:
+
+```
+Index Only Scan using tasks_project_id_created_at_id_idx on tasks (actual rows=21)
+  Index Cond: ((project_id = '…') AND (created_at >= '…'))
+  Filter: ((created_at > '…') OR (id > '…'))
+  Rows Removed by Filter: 1
+```
+
+One row thrown away instead of 2,500: only the ties at exactly `v` are read for nothing.
+`afterTimestamp()` in `tasks.query.ts` builds this condition.
+
+For `order=desc`, every comparison flips (`<=`, `<`) and Postgres reads the same index
+**backward** (`Index Scan Backward` in the plan), so one index serves both directions.
+There's one index per way of sorting, `(project_id, created_at, id)`,
+`(project_id, updated_at, id)` and `(project_id, due_date, id)`, and each starts with
+`project_id` because a list is always inside one project.
+
+**Read the plan, don't guess.** `EXPLAIN ANALYZE <query>` runs a query and shows how
+Postgres executed it: which index, the `Index Cond` (the stretch of the index it read) and
+the `Filter` (rows it read, then threw away). "Rows Removed by Filter" is the number to
+watch.
+
+### Concept 5: Missing values (NULL) need a plan
+
+Due dates are optional. Where do tasks without one go? We decided: **always last**, in both
+directions, because "no deadline" is never the most urgent.
+
+Postgres sorts `NULL` as if it were larger than any value: last in ascending order, but
+_first_ in descending order. Prisma can ask for `nulls: 'last'`, and for ascending order
+that matches the index. For descending order nothing matches, and we measured what
+Postgres does then: it reads all 5,000 tasks of the project and sorts them, for a page of 21.
+
+The "after" condition has the same problem. A list that ends with the `NULL`s needs an
+`OR`:
+
+```
+due_date > v  OR  (due_date = v AND id > lastId)  OR  due_date IS NULL
+```
+
+Measured: `Rows Removed by Filter: 1311`. Again, no single stretch of the index.
+
+So `TaskService` reads a page sorted by due date from **two stretches** of the
+`(project_id, due_date, id)` index, one after the other:
+
+1. The tasks **with** a due date, after the cursor, in date order. If they fill the page,
+   that's it.
+2. Otherwise, the rest of the page comes from the tasks **without** a due date, ordered by
+   id. In the index, the `NULL`s sit together at one end, sorted by the next column (`id`),
+   so they are a stretch too.
+
+When a page ends among the undated tasks, the cursor's value is `null`, and the next page
+only reads the second stretch. Page boundaries right at the switch from dated to undated
+tasks are covered by the "walk every page" tests.
+
+### Concept 6: The cursor is opaque, not secret, and validated
+
+The cursor is JSON (the sort, the order, the last task's sort value and its id), encoded
+as **base64url** so it's safe to put in a URL:
+
+```
+{"sort":"dueDate","order":"asc","value":"2026-12-01","id":"0b9d6c43-…"}
+  → eyJzb3J0IjoiZHVlRGF0ZSIsIm9yZGVyIjoiYXNjIiwidmFsdWUiOiIyMDI2LTEyLTAxIiwiaWQiOi…
+```
+
+- **Opaque:** clients must not build or change it, only send it back. That leaves us free
+  to change what's inside later.
+- **Not secret:** anyone can decode base64. That's fine, because the cursor holds nothing
+  the client didn't already see in the page. (If it had to be tamper-proof, we would sign
+  it with an HMAC, like a JWT.)
+- **It carries values, not only an id.** "After task X" would need task X to still exist.
+  With the values, a cursor keeps working even if that task was deleted in the meantime
+  (tested).
+- **Validated like any input.** Base64 that isn't JSON, JSON of the wrong shape, an id that
+  isn't a uuid, a value that isn't a timestamp: all `400 INVALID_CURSOR`. The cursor also
+  records the sort and order it was made for, so a "sorted by due date" cursor sent to a
+  "sorted by creation" list is refused, instead of silently returning the wrong tasks.
+- **Its values are checked, too.** A tampered cursor with the date `0000-01-01` is valid
+  ISO 8601, but Postgres has no year 0 and would fail the query: a `500`. So cursor
+  timestamps must be from 1970 on and dates from 1900 on. The test "refuses a tampered
+  cursor with year 0, with 400 and not 500" is there because of this.
+
+Filters aren't stored in the cursor, so a client should send the same filters with every
+page. (Exercise 7 asks what it would take to enforce that.)
+
+### Concept 7: Filtering and sorting with allow-lists
+
+Every filter and sort is spelled out in the Zod schema: `sort` must be one of three field
+names, `status` one of three values, and so on. Nothing from the query string ever becomes
+a column name or SQL text. That's an **allow-list**: we list what's allowed, and anything
+else is a `400`. (The opposite, a block-list, tries to list what's forbidden, and always
+forgets something.)
+
+- **Lists:** `status=TODO,IN_PROGRESS` is split on the commas and each item is checked
+  against the enum. A list has at most 3 items and 100 characters.
+- **Ranges:** `dueFrom` and `dueTo` both include their day, and a `dueFrom` after `dueTo`
+  is a `400`: a clear error beats a mysteriously empty list.
+- **Filters add up:** each one adds a condition, and a task must match all of them
+  (`taskFilters()` in `tasks.query.ts`).
+
+**Search, and a trap in LIKE.** `q=report` becomes `title ILIKE '%report%'`. In `LIKE`
+patterns, `%` means "any text" and `_` means "any one character". Prisma's `contains` does
+**not** escape them. We checked: a search for `100%` also found "100 apples", and `a_b`
+found "axb". `escapeLike()` puts a backslash before `%`, `_` and the backslash itself, and
+the tests search for exactly those titles.
+
+A `%…%` search can't use a normal index, so it reads every task of the project (at most
+`MAX_TASKS_PER_PROJECT`). Exercise 3 makes it fast with a trigram index.
+
+### Concept 8: A due date is a day, not a moment
+
+`createdAt` is a **moment**: `2026-11-19T16:31:05.123Z`, the same instant everywhere on
+Earth. A due date is a **calendar day**: "December 31st". If we stored it as a moment,
+midnight UTC on the 31st would still be the 30th in New York, and a client there would show
+the wrong day.
+
+So `due_date` is a Postgres `DATE` column (no time, no time zone), and the API sends and
+receives `"2026-12-31"`. Prisma represents a `DATE` as a JavaScript `Date` at midnight UTC;
+`dateFromIso()` and `isoFromDate()` in `src/lib/dates.ts` convert both ways, and no other
+code needs to know.
+
+The `IsoDay` schema checks that the day exists (`2028-02-29` is fine, `2026-02-29` and
+`2026-02-30` are not) and is from 1900 on.
+
+### Concept 9: PATCH: a missing field and `null` mean different things
+
+`PATCH` changes only the fields you send. For a field that can be empty, JSON can say three
+different things:
+
+```
+{ "title": "New title" }       dueDate is missing: keep it as it is
+{ "dueDate": null }            clear it
+{ "dueDate": "2026-12-31" }    set it
+```
+
+The API keeps that difference: a missing field is left alone, and `null` clears the due
+date or the assignee. A `PATCH` with nothing to change (`{}`, or only unknown fields) is a
+`400` instead of a silent no-op.
+
+With `exactOptionalPropertyTypes` (chapter 3), TypeScript won't let `{ title: undefined }`
+slip through to Prisma by accident: `taskChanges()` adds a field to the update only if it
+was sent.
+
+### Concept 10: Who may do what, including "it's mine"
+
+| Action                          | Who                                                 |
+| ------------------------------- | --------------------------------------------------- |
+| Read projects and tasks         | Every member                                        |
+| Create, rename, delete projects | ADMIN and OWNER (`projects:manage`)                 |
+| Create and edit tasks           | Every member (`tasks:write`)                        |
+| Delete a task                   | Its creator, or ADMIN and OWNER (`tasks:deleteAny`) |
+
+The last row is an **ownership-based** rule: it depends on the task, not only on your role.
+The role part stays in the policy table, and the service adds "or you created it":
+
+```ts
+if (task.createdById !== userId && !can(membership.role, 'tasks:deleteAny')) {
+  throw Errors.forbidden('Only the creator of a task, or an admin, can delete it');
+}
+```
+
+### Concept 11: Shared and exclusive locks, and a fixed lock order
+
+Chapter 4's rule was "lock, then check, then write", and it applies here too. But task edits
+are frequent and come from every member, and making them wait for one another would be
+wasteful. Postgres has row locks of different strengths for this:
+
+| Lock                     | How many at once | Used by                                                             |
+| ------------------------ | ---------------- | ------------------------------------------------------------------- |
+| `FOR UPDATE` (exclusive) | one transaction  | membership and role changes, workspace renames, creating a project  |
+| `FOR SHARE` (shared)     | many             | editing and deleting projects; creating, editing and deleting tasks |
+
+The two conflict: while any task write holds the shared lock on the workspace row, no
+membership or role can change, and the other way round. That keeps true, until we commit,
+what we checked at the start: that the caller is still a member with the right role, and
+that the new assignee is still a member.
+
+That last one is an invariant: **a task is only ever assigned to a member**. Removing a
+member unassigns their tasks, in the same transaction. Without the shared lock, this could
+happen:
+
+```
+assign request:  is Dana a member? yes ✓ .............................. insert task for Dana ✓
+remove request:  ............. delete Dana's membership, unassign her tasks ✓
+```
+
+The remove request couldn't see the new task (it wasn't committed yet), so the task stayed
+assigned to someone who's no longer a member. The test "never leaves a task assigned to
+someone who is no longer a member, even under a race" removes Dana while four requests
+assign her, four times over. Without the shared lock, it failed in 5 runs out of 5.
+
+**Exclusive locks where a count matters.** Quotas are counted under an exclusive lock, as
+in chapter 4: the workspace row before counting projects, and the project row
+(`lockProject()`) before counting tasks. Two task creations in the same project wait for
+each other; in different projects, they don't.
+
+**Lock the row you're about to change.** Editing or deleting a task first locks it
+(`lockTask()`, which looks it up by workspace, project and task id). That's also the
+existence check, so a delete racing an edit gets a clean `404` instead of failing halfway
+with a `500`. In the same way, a task created while its project is being deleted gets a
+`404` or is deleted with the project (tested). With `lockProject()` reduced to a plain
+lookup, that test saw `500`s in every run.
+
+**Lock order: workspace, then project, then task.** Every transaction takes its locks in
+that order, so two transactions can never each hold a lock the other is waiting for (the
+deadlock from chapter 4). Postgres also takes locks you didn't ask for: inserting a task
+checks its foreign keys with a light `FOR KEY SHARE` lock on the project row and on the
+users it references. Those come at the end, so they keep the order.
+
+A shared lock isn't free: Postgres has to record every transaction holding it on the row
+itself. At thousands of writes per second _in one workspace_ that bookkeeping would start
+to show. This API is nowhere near that.
+
+### Concept 12: The Power of Ten rules in this chapter
+
+**Rule 3: everything has a bound.**
+
+| What                   | Bound                   | Where                                          |
+| ---------------------- | ----------------------- | ---------------------------------------------- |
+| Page size              | default 20, at most 100 | `LIMITS.pageSizeDefault`, `pageSizeMax`        |
+| Cursor length          | 512 characters          | `LIMITS.cursorMaxLength`                       |
+| Projects per workspace | 100 (at most 1,000)     | `MAX_PROJECTS_PER_WORKSPACE`                   |
+| Tasks per project      | 5,000 (at most 100,000) | `MAX_TASKS_PER_PROJECT`, `LIMITS.taskQuotaMax` |
+
+The task list is paginated, so its quota may go above `LIMITS.listMax`: the page size
+bounds the response, and the quota bounds storage and the cost of a search. Even the test
+helper that follows `nextCursor` gives up after 100 pages, so a bug can't make it loop
+forever (rule 2).
+
+**Rule 5: assert what can't happen.** `toPage()` asserts that the query returned at most
+`limit + 1` rows. More would mean the query is wrong, and quietly cutting the list would
+hide that bug.
+
+**Rules 4 and 9: small, simple functions.** The list query is built from small pure
+functions in `tasks.query.ts` (filters, order, "after the cursor"), each easy to read and
+to test without a database. ESLint allows at most four parameters, so the ids from the URL
+travel as one object (`ProjectRef`, `TaskRef`), straight from Fastify's `request.params`.
+
+**Rule 7: check every input.** Comma-separated lists are checked item by item, and dates for
+existence and range. `test/input-bounds.test.ts` now covers the project and task schemas
+too (a `date` string has a fixed length, like a `uuid`).
+
+### How we know the tests work
+
+A test proves only what it checks. So each important test was run against the bug it's
+meant to catch: we put the bug in on purpose, ran the test, and took the bug out again.
+
+| Bug put in on purpose                                         | Caught by                                   |
+| ------------------------------------------------------------- | ------------------------------------------- |
+| No shared lock on the workspace                               | the assignment-vs-removal race (5 out of 5) |
+| `lockProject()` reduced to a lookup without a lock            | task creation vs project deletion (`500`s)  |
+| Projects counted under the shared lock, not the exclusive one | the project quota race (3 out of 3)         |
+| Tasks counted without locking the project                     | the task quota race (3 out of 3)            |
+| Due-date pages never reading the tasks without a due date     | the "walk every page" test                  |
+| Undated tasks paged in the wrong id direction                 | the "walk every page" test                  |
+| No id tiebreaker                                              | the "walk every page" test                  |
+| The cursor pointing at the extra row, not the last one        | the "walk every page" test                  |
+
+This is called **mutation testing**: change the code in a small, wrong way (a "mutant")
+and check that some test fails. A mutant that survives points at a missing test. The query
+plans in Concepts 2, 4 and 5 were measured the same way, with `EXPLAIN ANALYZE` on 20
+projects of 5,000 tasks each, instead of assumed.
+
+### Build it yourself
+
+1. Add `Project` and `Task` to the schema with the composite foreign key, migrate, and read
+   the SQL. Try to insert a task whose `workspace_id` doesn't match its project's.
+2. Write projects first (create, read, rename, delete) with their role checks, and the IDOR
+   test with a project from another workspace.
+3. Add tasks, still without the list. Test "assign someone who isn't a member" (400) and the
+   delete rule (creator or admin).
+4. Add the list with `OFFSET` first. Insert 5,000 tasks with SQL and compare
+   `EXPLAIN ANALYZE` for page 1 and page 126. Then switch to keyset pagination and compare
+   again.
+5. Write the "walk every page" test with tied timestamps, and watch it fail without the id
+   tiebreaker.
+6. Add `sort=dueDate`, first as one query with `nulls: 'last'`, and read its plan in
+   descending order. Then split it into the two stretches.
+7. Add the filters, one test each. Search for `100%` before and after `escapeLike()`.
+8. Without `lockWorkspaceShared()`, run the race test that removes a member while assigning
+   them tasks, and watch the invariant break. Then add the lock.
+
+### Exercises
+
+1. **Total count.** Clients want "showing 20 of 1,234". Add `?include=total`, which also
+   returns how many tasks match. Why should it be optional? What does it cost with
+   100,000 tasks?
+2. **My tasks.** Add `GET /workspaces/:id/tasks?assigneeId=me`, across all projects. Which
+   index serves it? Do you need a new one?
+3. **Fast search.** Enable the `pg_trgm` extension, add a GIN trigram index on `title`, and
+   compare `EXPLAIN ANALYZE` for `q=report` before and after.
+4. **Move a task.** Let `PATCH { "projectId": … }` move a task to another project in the
+   same workspace. Which locks, in which order? What does the composite foreign key do if
+   someone tries to move it into another workspace's project?
+5. **A cheaper quota.** Counting tasks reads up to `MAX_TASKS_PER_PROJECT` index entries per
+   creation. Keep a `task_count` column on projects instead. What must update it, and what
+   makes sure it stays right?
+6. **Row comparison.** Postgres can compare rows: `(created_at, id) > ($1, $2)` reads one
+   stretch of the index with no filter at all (try it with `EXPLAIN ANALYZE`). Prisma can't
+   express it. Is it worth a raw SQL query? What about `order=desc`, and the due date with
+   its `NULL`s?
+7. **Filters in the cursor.** Today, changing the filters between pages goes unnoticed. Put
+   a hash of the filters in the cursor and refuse a mismatch. Is it worth it?
+8. **Previous page.** Add `prevCursor`. Hint: query in the opposite order, then reverse the
+   rows.
+9. **Sort by priority.** Postgres orders an enum by its declaration: `LOW < MEDIUM < HIGH`.
+   What would the cursor's `value` be, and which index would you need?
+
+### Words to know
+
+nested resource · denormalization · composite foreign key · pagination · offset pagination ·
+keyset (cursor) pagination · tiebreaker · total order · index scan · `EXPLAIN ANALYZE` ·
+index condition vs filter · backward index scan · `NULLS FIRST` / `NULLS LAST` · opaque
+cursor · base64url · allow-list vs block-list · `LIKE` wildcards and escaping · calendar date
+vs timestamp · `PATCH` semantics (missing vs `null`) · ownership-based permission · shared
+lock (`FOR SHARE`) vs exclusive lock (`FOR UPDATE`) · lock order · mutation testing

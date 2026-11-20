@@ -30,7 +30,9 @@ export const Member = z.object({
   joinedAt: z.date(),
 });
 
-// Lists are wrapped in { data: [...] } so step 5 can add pagination
-// fields next to `data` without breaking existing clients.
+// Lists are wrapped in { data: [...] }, so fields can be added next to `data`
+// without breaking existing clients. The project and task lists add
+// `nextCursor` there; these two are short (bounded by their quotas) and
+// still come in one piece.
 export const WorkspaceList = z.object({ data: z.array(WorkspaceSummary) });
 export const MemberList = z.object({ data: z.array(Member) });
