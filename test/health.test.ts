@@ -55,4 +55,19 @@ describe('environment validation', () => {
   it('rejects a non-Postgres DATABASE_URL', () => {
     expect(() => loadEnv({ DATABASE_URL: 'mysql://x@y/z' })).toThrow(/DATABASE_URL/);
   });
+
+  it('bounds the tasks per workspace: projects per workspace × tasks per project', () => {
+    const base = {
+      DATABASE_URL: 'postgresql://api:api@localhost:5432/api',
+      JWT_ACCESS_SECRET: 'x'.repeat(32),
+    };
+    expect(loadEnv(base)).toMatchObject({
+      MAX_PROJECTS_PER_WORKSPACE: 20,
+      MAX_TASKS_PER_PROJECT: 5_000,
+    });
+    const both = { MAX_PROJECTS_PER_WORKSPACE: '100', MAX_TASKS_PER_PROJECT: '1000' };
+    expect(loadEnv({ ...base, ...both })).toMatchObject({ MAX_TASKS_PER_PROJECT: 1_000 });
+    const tooMany = { MAX_PROJECTS_PER_WORKSPACE: '100', MAX_TASKS_PER_PROJECT: '5000' };
+    expect(() => loadEnv({ ...base, ...tooMany })).toThrow(/MAX_TASKS_PER_PROJECT: .*100,000/);
+  });
 });

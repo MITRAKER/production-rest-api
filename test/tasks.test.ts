@@ -82,6 +82,7 @@ describe('POST .../projects/:projectId/tasks', () => {
     ['an empty title', { title: ' ' }],
     ['a title that is too long', { title: 'x'.repeat(201) }],
     ['a description that is too long', { title: 'X', description: 'x'.repeat(5001) }],
+    ['the NUL character, which Postgres text cannot hold', { title: 'X', description: 'a\u0000' }],
     ['an unknown status', { title: 'X', status: 'DOING' }],
     ['an unknown priority', { title: 'X', priority: 'URGENT' }],
     ['a day that does not exist', { title: 'X', dueDate: '2026-02-30' }],

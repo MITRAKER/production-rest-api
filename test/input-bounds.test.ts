@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { NUL_MESSAGE } from '../src/lib/text.js';
 import * as authSchemas from '../src/modules/auth/auth.schemas.js';
 import * as invitationSchemas from '../src/modules/invitations/invitations.schemas.js';
 import * as projectSchemas from '../src/modules/projects/projects.schemas.js';
@@ -7,10 +8,14 @@ import * as taskSchemas from '../src/modules/tasks/tasks.schemas.js';
 import * as workspaceSchemas from '../src/modules/workspaces/workspaces.schemas.js';
 
 /**
- * Power of Ten rule 3, checked automatically: every value a client can send
- * must have an upper bound. This test converts every input schema (exports
- * named *Body, *Params or *Query) to JSON Schema and checks that every string
- * has a maxLength (or a fixed format) and every array has a maxItems.
+ * Rules that every input schema (exports named *Body, *Params or *Query) must
+ * follow, checked automatically on all of them:
+ *
+ * - Power of Ten rule 3: every value a client can send has an upper bound.
+ *   Each schema is converted to JSON Schema, and every string must have a
+ *   maxLength (or a fixed format) and every array a maxItems.
+ * - No string may contain the NUL character, which Postgres text can't hold
+ *   (see src/lib/text.ts).
  *
  * When you add a schema module, add it to `modules` below.
  */
@@ -78,6 +83,10 @@ const inputSchemas = Object.entries(modules).flatMap(([moduleName, exports]) =>
     .map(([name, value]) => ({ name: `${moduleName}.${name}`, schema: value as z.ZodType })),
 );
 
+function toJson(schema: z.ZodType): JsonNode {
+  return z.toJSONSchema(schema, { io: 'input', unrepresentable: 'any' });
+}
+
 describe('every client input is bounded (Power of Ten rule 3)', () => {
   it('finds the input schemas', () => {
     expect(inputSchemas.length).toBeGreaterThan(0);
@@ -85,8 +94,39 @@ describe('every client input is bounded (Power of Ten rule 3)', () => {
 
   for (const { name, schema } of inputSchemas) {
     it(name, () => {
-      const json = z.toJSONSchema(schema, { io: 'input', unrepresentable: 'any' });
-      expect(unboundedParts(json as JsonNode)).toEqual([]);
+      expect(unboundedParts(toJson(schema))).toEqual([]);
+    });
+  }
+});
+
+/** The top-level fields that take free text: strings that aren't an id, a date, an email or a fixed value. */
+function freeTextFields(json: JsonNode): string[] {
+  const properties = isObject(json['properties']) ? json['properties'] : {};
+  return Object.entries(properties)
+    .filter(([, node]) => isObject(node) && node['type'] === 'string')
+    .filter(([, node]) => !['format', 'enum', 'const'].some((key) => key in (node as JsonNode)))
+    .map(([field]) => field);
+}
+
+const textFields = inputSchemas.flatMap(({ name, schema }) =>
+  freeTextFields(toJson(schema)).map((field) => ({ name: `${name}.${field}`, schema, field })),
+);
+
+describe('no client string may contain NUL (U+0000)', () => {
+  it('finds the free-text fields', () => {
+    const names = textFields.map((f) => f.name);
+    expect(names).toContain('auth.RegisterBody.password');
+    expect(names).toContain('projects.CreateProjectBody.description');
+    expect(names).toContain('tasks.TaskListQuery.q');
+    expect(names).toContain('tasks.TaskListQuery.cursor');
+  });
+
+  for (const { name, schema, field } of textFields) {
+    it(name, () => {
+      const result = schema.safeParse({ [field]: 'some text\u0000' });
+      const issues = result.error?.issues ?? [];
+      const messages = issues.filter((issue) => issue.path[0] === field).map((i) => i.message);
+      expect(messages).toContain(NUL_MESSAGE);
     });
   }
 });

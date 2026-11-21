@@ -3,6 +3,7 @@ import { LIMITS } from '../config/limits.js';
 import { dateFromIso, IsoDay } from './dates.js';
 import { Errors } from './errors.js';
 import { invariant } from './invariant.js';
+import { Text } from './text.js';
 
 /**
  * Keyset ("cursor") pagination, shared by every paginated list.
@@ -14,7 +15,9 @@ import { invariant } from './invariant.js';
  * however far into the list the client is.
  *
  * The cursor carries the values themselves, not only an id. So it keeps
- * working even if that last item was edited or deleted in the meantime.
+ * working even if that last item was edited or deleted in the meantime. It
+ * also names the list it was made for (its scope, such as the tasks of one
+ * project) and how that list was sorted, and it is refused anywhere else.
  *
  * It's base64url-encoded JSON: opaque to clients (they must not build or
  * change it), but not secret. Whatever comes back is validated like any other
@@ -26,7 +29,7 @@ export type SortOrder = 'asc' | 'desc';
 /** The query parameters every paginated list accepts. */
 export const PageQuery = z.object({
   limit: z.coerce.number().int().min(1).max(LIMITS.pageSizeMax).default(LIMITS.pageSizeDefault),
-  cursor: z.string().min(1).max(LIMITS.cursorMaxLength).optional(),
+  cursor: Text.min(1).max(LIMITS.cursorMaxLength).optional(),
 });
 
 export type PageQuery = z.infer<typeof PageQuery>;
@@ -37,6 +40,8 @@ export function pageOf<T extends z.ZodType>(item: T) {
 }
 
 const CursorSchema = z.object({
+  /** The list the cursor belongs to, such as "tasks:<projectId>". */
+  scope: z.string().max(60),
   sort: z.string().max(20),
   order: z.enum(['asc', 'desc']),
   /** The sort value of the last item, as an ISO date or date-time, or null. */
@@ -45,6 +50,9 @@ const CursorSchema = z.object({
 });
 
 export type Cursor = z.infer<typeof CursorSchema>;
+
+/** What a cursor must have been made for: the same list, sorted the same way. */
+export type CursorKey = Pick<Cursor, 'scope' | 'sort' | 'order'>;
 
 export function encodeCursor(cursor: Cursor): string {
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
@@ -58,17 +66,19 @@ function parseJson(text: string): unknown {
   }
 }
 
+function isMadeFor(cursor: Cursor, key: CursorKey): boolean {
+  return cursor.scope === key.scope && cursor.sort === key.sort && cursor.order === key.order;
+}
+
 /**
- * Decodes a cursor and checks it was made for this sort and order. Anything
- * else (garbage, a tampered cursor, one from a list sorted another way) is a
- * 400 INVALID_CURSOR.
+ * Decodes a cursor and checks it was made for this list, sort and order.
+ * Anything else (garbage, a tampered cursor, one from another list or from
+ * this list sorted another way) is a 400 INVALID_CURSOR.
  */
-export function decodeCursor(raw: string, sort: string, order: SortOrder): Cursor {
+export function decodeCursor(raw: string, key: CursorKey): Cursor {
   const json = parseJson(Buffer.from(raw, 'base64url').toString('utf8'));
   const parsed = CursorSchema.safeParse(json);
-  if (!parsed.success || parsed.data.sort !== sort || parsed.data.order !== order) {
-    throw Errors.invalidCursor();
-  }
+  if (!parsed.success || !isMadeFor(parsed.data, key)) throw Errors.invalidCursor();
   return parsed.data;
 }
 

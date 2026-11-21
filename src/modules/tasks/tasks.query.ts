@@ -84,6 +84,10 @@ function sortValue(task: Task, sort: TaskSort): string | null {
   return task[sort].toISOString();
 }
 
+/** A cursor names its list: the tasks of one project. */
+export const taskListScope = (projectId: string) => `tasks:${projectId}`;
+
 export function taskCursor(task: Task, sort: TaskSort, order: SortOrder): string {
-  return encodeCursor({ sort, order, value: sortValue(task, sort), id: task.id });
+  const scope = taskListScope(task.projectId);
+  return encodeCursor({ scope, sort, order, value: sortValue(task, sort), id: task.id });
 }

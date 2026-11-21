@@ -22,6 +22,7 @@ import {
   datedAfter,
   taskCursor,
   taskFilters,
+  taskListScope,
   timestampOrder,
   undatedAfter,
 } from './tasks.query.js';
@@ -125,8 +126,8 @@ export class TaskService {
     await requireMembership(this.prisma, ref.workspaceId, userId);
     await requireProject(this.prisma, ref);
 
-    const cursor =
-      query.cursor === undefined ? null : decodeCursor(query.cursor, query.sort, query.order);
+    const key = { scope: taskListScope(ref.projectId), sort: query.sort, order: query.order };
+    const cursor = query.cursor === undefined ? null : decodeCursor(query.cursor, key);
     const where: Where = {
       AND: [{ projectId: ref.projectId, workspaceId: ref.workspaceId }, ...taskFilters(query)],
     };
@@ -173,19 +174,30 @@ export class TaskService {
     return this.datedThenUndated(where, datedAfter(order, value, cursor.id), order, take);
   }
 
+  /**
+   * The two reads share one REPEATABLE READ transaction, so both see the
+   * table as it was at the first one. As two separate statements, each would
+   * see the latest commits: a task whose due date is set or cleared between
+   * them would be on the page twice, or not at all.
+   */
   private async datedThenUndated(where: Where, dated: Where, order: SortOrder, take: number) {
-    const first = await this.prisma.task.findMany({
-      where: { AND: [where, dated] },
-      orderBy: [{ dueDate: order }, { id: order }],
-      take,
-    });
-    if (first.length === take) return first;
-    const rest = await this.prisma.task.findMany({
-      where: { AND: [where, { dueDate: null }] },
-      orderBy: { id: order },
-      take: take - first.length,
-    });
-    return [...first, ...rest];
+    return this.prisma.$transaction(
+      async (tx) => {
+        const first = await tx.task.findMany({
+          where: { AND: [where, dated] },
+          orderBy: [{ dueDate: order }, { id: order }],
+          take,
+        });
+        if (first.length === take) return first;
+        const rest = await tx.task.findMany({
+          where: { AND: [where, { dueDate: null }] },
+          orderBy: { id: order },
+          take: take - first.length,
+        });
+        return [...first, ...rest];
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
   }
 
   async get(ref: TaskRef, userId: string) {

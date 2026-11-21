@@ -1,11 +1,12 @@
 import { z } from 'zod';
 import { pageOf, PageQuery } from '../../lib/pagination.js';
+import { Text } from '../../lib/text.js';
 import { WorkspaceParams } from '../workspaces/workspaces.schemas.js';
 
 export const ProjectParams = WorkspaceParams.extend({ projectId: z.uuid() });
 
-const Name = z.string().trim().min(1).max(100);
-const Description = z.string().max(2_000);
+const Name = Text.trim().min(1).max(100);
+const Description = Text.max(2_000);
 
 export const CreateProjectBody = z.object({ name: Name, description: Description.default('') });
 

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { IsoDay } from '../../lib/dates.js';
 import { pageOf, PageQuery } from '../../lib/pagination.js';
+import { Text } from '../../lib/text.js';
 import { ProjectParams } from '../projects/projects.schemas.js';
 
 export const TaskStatus = z.enum(['TODO', 'IN_PROGRESS', 'DONE']);
@@ -8,8 +9,8 @@ export const TaskPriority = z.enum(['LOW', 'MEDIUM', 'HIGH']);
 
 export const TaskParams = ProjectParams.extend({ taskId: z.uuid() });
 
-const Title = z.string().trim().min(1).max(200);
-const Description = z.string().max(5_000);
+const Title = Text.trim().min(1).max(200);
+const Description = Text.max(5_000);
 
 export const CreateTaskBody = z.object({
   title: Title,
@@ -37,10 +38,7 @@ export const UpdateTaskBody = z
   .refine((body) => Object.keys(body).length > 0, { message: 'Send at least one field to change' });
 
 /** "LOW,HIGH" → ["LOW", "HIGH"]. Each item is then checked against the allowed values. */
-const CommaList = z
-  .string()
-  .max(100)
-  .transform((value) => value.split(','));
+const CommaList = Text.max(100).transform((value) => value.split(','));
 
 // Sorting and filtering only accept the fields and values listed here (an
 // allow-list): a client can't sort or filter by an arbitrary column.
@@ -57,7 +55,7 @@ export const TaskListQuery = PageQuery.extend({
   dueFrom: IsoDay.optional(),
   dueTo: IsoDay.optional(),
   // Case-insensitive search in task titles.
-  q: z.string().trim().min(1).max(100).optional(),
+  q: Text.trim().min(1).max(100).optional(),
 }).refine(
   (query) =>
     query.dueFrom === undefined || query.dueTo === undefined || query.dueFrom <= query.dueTo,

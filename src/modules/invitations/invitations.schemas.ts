@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Text } from '../../lib/text.js';
 import { Email } from '../auth/auth.schemas.js';
 import { Role, WorkspaceParams } from '../workspaces/workspaces.schemas.js';
 
@@ -13,7 +14,7 @@ export const CreateInvitationBody = z.object({
 });
 
 export const AcceptInvitationBody = z.object({
-  token: z.string().min(1).max(200),
+  token: Text.min(1).max(200),
 });
 
 export const Invitation = z.object({

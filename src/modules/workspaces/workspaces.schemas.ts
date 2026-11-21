@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Text } from '../../lib/text.js';
 
 export const Role = z.enum(['OWNER', 'ADMIN', 'MEMBER']);
 
@@ -7,7 +8,7 @@ export const Role = z.enum(['OWNER', 'ADMIN', 'MEMBER']);
 export const WorkspaceParams = z.object({ workspaceId: z.uuid() });
 export const MemberParams = WorkspaceParams.extend({ userId: z.uuid() });
 
-const Name = z.string().trim().min(1).max(100);
+const Name = Text.trim().min(1).max(100);
 
 export const CreateWorkspaceBody = z.object({ name: Name });
 export const UpdateWorkspaceBody = z.object({ name: Name });

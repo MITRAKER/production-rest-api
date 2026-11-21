@@ -39,8 +39,11 @@ export const LIMITS = {
   /** A pagination cursor is a short opaque string; anything longer is rejected. */
   cursorMaxLength: 512,
   /**
-   * The highest value MAX_TASKS_PER_PROJECT may be set to. Task lists are
-   * paginated, so this bounds storage and counting, not response size.
+   * The most tasks a workspace can hold: MAX_PROJECTS_PER_WORKSPACE times
+   * MAX_TASKS_PER_PROJECT may not be more. Removing a member unassigns all
+   * their tasks in one statement, while the workspace is locked; for 100,000
+   * tasks that took about 1.5 s, well inside the 10 s timeouts. Task lists
+   * are paginated, so this bounds work and storage, not response size.
    */
-  taskQuotaMax: 100_000,
+  tasksPerWorkspaceMax: 100_000,
 } as const;

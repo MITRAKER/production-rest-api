@@ -68,6 +68,7 @@ describe('POST /workspaces/:workspaceId/projects', () => {
     ['an empty name', { name: '   ' }],
     ['a name that is too long', { name: 'x'.repeat(101) }],
     ['a description that is too long', { name: 'X', description: 'x'.repeat(2001) }],
+    ['a name with the NUL character, which Postgres text cannot hold', { name: 'a\u0000b' }],
     ['no name', { description: 'only this' }],
   ])('rejects %s', async (_label, payload) => {
     const team = await createTeam(app);
@@ -117,12 +118,25 @@ describe('GET /workspaces/:workspaceId/projects/:projectId', () => {
 });
 
 describe('GET /workspaces/:workspaceId/projects', () => {
+  /**
+   * Projects created one minute apart. Created through the API in a quick
+   * loop, two could share a millisecond, and then their order would depend
+   * on their random ids.
+   */
   async function teamWithProjects(count: number) {
     const team = await createTeam(app);
-    const projects: ProjectJson[] = [];
-    for (let i = 0; i < count; i++) {
-      projects.push(await createProject(team.owner.api, team.workspaceId, `Project ${String(i)}`));
-    }
+    await app.prisma.project.createMany({
+      data: Array.from({ length: count }, (_, i) => ({
+        workspaceId: team.workspaceId,
+        name: `Project ${String(i)}`,
+        createdById: team.owner.id,
+        createdAt: new Date(Date.UTC(2026, 10, 1, 10, i)),
+      })),
+    });
+    const projects = await app.prisma.project.findMany({
+      where: { workspaceId: team.workspaceId },
+      orderBy: { createdAt: 'asc' },
+    });
     return { ...team, projects };
   }
 
@@ -183,15 +197,27 @@ describe('GET /workspaces/:workspaceId/projects', () => {
     expect(res.json().error.code).toBe(code);
   });
 
-  it("rejects a cursor from another list (the task list's, sorted another way)", async () => {
+  it('rejects a cursor from another list, even one sorted the same way', async () => {
     const team = await createTeamWithProject(app);
     await createTask(team.owner.api, team.tasksUrl);
     await createTask(team.owner.api, team.tasksUrl);
-    const tasks = (await team.owner.api.get(`${team.tasksUrl}?limit=1`)).json<PageJson<unknown>>();
+    const tasksUrl = `${team.tasksUrl}?limit=1&sort=createdAt&order=asc`;
+    const tasks = (await team.owner.api.get(tasksUrl)).json<PageJson<unknown>>();
 
-    const res = await team.owner.api.get(`${team.url}/projects?cursor=${String(tasks.nextCursor)}`);
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error.code).toBe('INVALID_CURSOR');
+    // The project list of another workspace, which Alice owns too.
+    const other = (await team.owner.api.post('/workspaces', { name: 'Other' })).json<{
+      id: string;
+    }>().id;
+    await createProject(team.owner.api, other, 'A');
+    await createProject(team.owner.api, other, 'B');
+    const projectsUrl = `/workspaces/${other}/projects?limit=1`;
+    const projects = (await team.owner.api.get(projectsUrl)).json<PageJson<unknown>>();
+
+    for (const cursor of [tasks.nextCursor, projects.nextCursor]) {
+      const res = await team.owner.api.get(`${team.url}/projects?cursor=${String(cursor)}`);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('INVALID_CURSOR');
+    }
   });
 
   it('answers 404 to outsiders', async () => {

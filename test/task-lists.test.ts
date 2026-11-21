@@ -3,11 +3,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildTestApp,
   type Client,
+  createProject,
   createTask,
   createTeamWithProject,
   type PageJson,
   resetDb,
   type TaskJson,
+  warmUpPool,
 } from './helpers.js';
 
 /**
@@ -53,6 +55,7 @@ async function walk(api: Client, tasksUrl: string, query: string) {
 }
 
 const titles = (tasks: TaskJson[]) => tasks.map((t) => t.title);
+const sorted = (values: string[]) => [...values].sort((a, b) => a.localeCompare(b));
 
 describe('filters', () => {
   async function seed(team: Team) {
@@ -72,11 +75,14 @@ describe('filters', () => {
     await make({ title: 'axb' });
   }
 
+  // Which tasks match, in alphabetical order: the tasks above are created
+  // quickly, two can share a millisecond, and then the order the API returns
+  // depends on their random ids. Sorting is tested in the next section.
   it.each([
     ['status=DONE', ['100% done', 'Plan']],
     ['status=DONE,IN_PROGRESS', ['100% done', 'Design', 'Plan']],
-    ['priority=HIGH', ['Test', 'Build']],
-    ['priority=LOW,HIGH&status=TODO', ['Test', 'Build']],
+    ['priority=HIGH', ['Build', 'Test']],
+    ['priority=LOW,HIGH&status=TODO', ['Build', 'Test']],
     ['assigneeId=none&priority=HIGH', []],
     ['dueFrom=2026-12-01&dueTo=2026-12-31', ['Build', 'Design']],
     ['dueFrom=2026-12-31', ['Build']],
@@ -89,7 +95,7 @@ describe('filters', () => {
     const team = await createTeamWithProject(app);
     await seed(team);
     const page = await list(team.member.api, `${team.tasksUrl}?${query}`);
-    expect(titles(page.data)).toEqual(expected);
+    expect(sorted(titles(page.data))).toEqual(expected);
   });
 
   it('filters by assignee', async () => {
@@ -109,6 +115,7 @@ describe('filters', () => {
     'dueFrom=2026-12-31&dueTo=2026-12-01',
     'dueFrom=tomorrow',
     'q=%20%20',
+    'q=a%00b',
     `q=${'x'.repeat(101)}`,
     'sort=title',
     'sort=createdAt&order=up',
@@ -257,6 +264,35 @@ describe('sorting and paging', () => {
     expect(titles(next.data)).toEqual(expected.slice(3, 6));
   });
 
+  // A due-date page is read in two parts: the tasks with a due date, then
+  // those without one. If each part saw the table at a different moment, a
+  // task whose due date is set or cleared in between would be on the page
+  // twice, or not at all.
+  it('reads a due-date page from one snapshot, even while due dates change', async () => {
+    const team = await createTeamWithProject(app);
+    const rows = await seed(team);
+    const everyId = sorted(rows.map((r) => r.id));
+    const moving = rows.filter((r) => ['t1', 't4', 't6', 't10'].includes(r.title));
+
+    for (let round = 0; round < 20; round++) {
+      const dueDate = round % 2 === 0 ? null : '2026-12-15';
+      await warmUpPool(app, 9);
+      const [pages] = await Promise.all([
+        Promise.all(
+          Array.from({ length: 5 }, () =>
+            list(team.member.api, `${team.tasksUrl}?sort=dueDate&limit=50`),
+          ),
+        ),
+        Promise.all(
+          moving.map((task) => team.owner.api.patch(`${team.tasksUrl}/${task.id}`, { dueDate })),
+        ),
+      ]);
+      for (const page of pages) {
+        expect(sorted(page.data.map((t) => t.id)), `round ${String(round)}`).toEqual(everyId);
+      }
+    }
+  });
+
   it('returns 20 tasks per page by default', async () => {
     const team = await createTeamWithProject(app);
     await app.prisma.task.createMany({
@@ -293,36 +329,38 @@ describe('invalid cursors', () => {
     }
   });
 
-  it.each([
-    ['garbage', 'sort=createdAt', 'garbage'],
-    [
-      'a date instead of a timestamp',
-      'sort=createdAt',
-      forge({ sort: 'createdAt', order: 'desc', value: '2026-11-19', id: ID }),
-    ],
-    [
-      'year 0',
-      'sort=createdAt',
-      forge({ sort: 'createdAt', order: 'desc', value: '0000-01-01T00:00:00.000Z', id: ID }),
-    ],
-    [
-      'a timestamp instead of a date',
-      'sort=dueDate',
-      forge({ sort: 'dueDate', order: 'desc', value: '2026-11-19T00:00:00.000Z', id: ID }),
-    ],
-    [
-      'a due date in year 0',
-      'sort=dueDate',
-      forge({ sort: 'dueDate', order: 'desc', value: '0000-01-01', id: ID }),
-    ],
-    [
-      'null for a timestamp',
-      'sort=updatedAt',
-      forge({ sort: 'updatedAt', order: 'desc', value: null, id: ID }),
-    ],
-  ])('refuses a tampered cursor with %s, with 400 and not 500', async (_label, query, cursor) => {
+  it('refuses a cursor from the task list of another project', async () => {
     const team = await createTeamWithProject(app);
-    const res = await team.owner.api.get(`${team.tasksUrl}?${query}&cursor=${cursor}`);
+    const other = await createProject(team.owner.api, team.workspaceId, 'Other');
+    const otherTasksUrl = `${team.url}/projects/${other.id}/tasks`;
+    await createTask(team.owner.api, otherTasksUrl);
+    await createTask(team.owner.api, otherTasksUrl);
+    const { nextCursor } = await list(team.owner.api, `${otherTasksUrl}?limit=1`);
+
+    const res = await team.owner.api.get(`${team.tasksUrl}?cursor=${String(nextCursor)}`);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('INVALID_CURSOR');
+  });
+
+  it('refuses garbage', async () => {
+    const team = await createTeamWithProject(app);
+    const res = await team.owner.api.get(`${team.tasksUrl}?cursor=garbage`);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('INVALID_CURSOR');
+  });
+
+  // Each forged cursor is right for this list in every way but one: its value.
+  it.each([
+    ['a date instead of a timestamp', 'createdAt', '2026-11-19'],
+    ['year 0', 'createdAt', '0000-01-01T00:00:00.000Z'],
+    ['a timestamp instead of a date', 'dueDate', '2026-11-19T00:00:00.000Z'],
+    ['a due date in year 0', 'dueDate', '0000-01-01'],
+    ['null for a timestamp', 'updatedAt', null],
+  ])('refuses a tampered cursor with %s, with 400 and not 500', async (_label, sort, value) => {
+    const team = await createTeamWithProject(app);
+    const scope = `tasks:${team.project.id}`;
+    const cursor = forge({ scope, sort, order: 'desc', value, id: ID });
+    const res = await team.owner.api.get(`${team.tasksUrl}?sort=${sort}&cursor=${cursor}`);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('INVALID_CURSOR');
   });
@@ -330,7 +368,8 @@ describe('invalid cursors', () => {
   it('accepts a hand-made cursor that is valid: it is opaque, not secret', async () => {
     const team = await createTeamWithProject(app);
     await createTask(team.owner.api, team.tasksUrl, { title: 'Undated' });
-    const cursor = forge({ sort: 'dueDate', order: 'asc', value: '2026-01-01', id: ID });
+    const scope = `tasks:${team.project.id}`;
+    const cursor = forge({ scope, sort: 'dueDate', order: 'asc', value: '2026-01-01', id: ID });
     const page = await list(
       team.owner.api,
       `${team.tasksUrl}?sort=dueDate&order=asc&cursor=${cursor}`,

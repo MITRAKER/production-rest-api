@@ -20,9 +20,13 @@ import { TaskListQuery } from '../src/modules/tasks/tasks.schemas.js';
  */
 
 const ID = '0b9d6c43-8c55-4c4e-9e0e-7f9a3e0f2a11';
+const SCOPE = 'tasks:7c1e4a52-3d55-4f0e-8a77-2b9e6f1d0c33';
+/** The list the test cursors are made for. */
+const KEY = { scope: SCOPE, sort: 'createdAt', order: 'asc' } as const;
 
 function cursor(overrides: Partial<Cursor> = {}): Cursor {
   return {
+    scope: SCOPE,
     sort: 'createdAt',
     order: 'asc',
     value: '2026-11-19T16:31:05.123Z',
@@ -49,16 +53,18 @@ function errorCode(fn: () => unknown): string {
 describe('cursors', () => {
   it('decodes what it encoded', () => {
     const original = cursor();
-    expect(decodeCursor(encodeCursor(original), 'createdAt', 'asc')).toEqual(original);
-    expect(
-      decodeCursor(encodeCursor(cursor({ value: null })), 'createdAt', 'asc').value,
-    ).toBeNull();
+    expect(decodeCursor(encodeCursor(original), KEY)).toEqual(original);
+    expect(decodeCursor(encodeCursor(cursor({ value: null })), KEY).value).toBeNull();
   });
 
-  it('only accepts a cursor made for the same sort and order', () => {
+  it('only accepts a cursor made for the same list, sort and order', () => {
     const raw = encodeCursor(cursor());
-    expect(errorCode(() => decodeCursor(raw, 'updatedAt', 'asc'))).toBe('INVALID_CURSOR');
-    expect(errorCode(() => decodeCursor(raw, 'createdAt', 'desc'))).toBe('INVALID_CURSOR');
+    const otherList = { ...KEY, scope: `tasks:${ID}` };
+    expect(errorCode(() => decodeCursor(raw, otherList))).toBe('INVALID_CURSOR');
+    expect(errorCode(() => decodeCursor(raw, { ...KEY, sort: 'updatedAt' }))).toBe(
+      'INVALID_CURSOR',
+    );
+    expect(errorCode(() => decodeCursor(raw, { ...KEY, order: 'desc' }))).toBe('INVALID_CURSOR');
   });
 
   it.each([
@@ -66,13 +72,14 @@ describe('cursors', () => {
     ['an empty string', ''],
     ['JSON null', rawCursor(null)],
     ['an array', rawCursor([])],
-    ['missing fields', rawCursor({ sort: 'createdAt', order: 'asc' })],
+    ['missing fields', rawCursor({ scope: SCOPE, sort: 'createdAt', order: 'asc' })],
+    ['no scope', rawCursor({ ...cursor(), scope: undefined })],
     ['an id that is not a uuid', rawCursor({ ...cursor(), id: '42' })],
     ['an unknown order', rawCursor({ ...cursor(), order: 'sideways' })],
     ['a value that is too long', rawCursor({ ...cursor(), value: 'x'.repeat(41) })],
     ['a value of the wrong type', rawCursor({ ...cursor(), value: 1 })],
   ])('rejects %s', (_label, raw) => {
-    expect(errorCode(() => decodeCursor(raw, 'createdAt', 'asc'))).toBe('INVALID_CURSOR');
+    expect(errorCode(() => decodeCursor(raw, KEY))).toBe('INVALID_CURSOR');
   });
 });
 

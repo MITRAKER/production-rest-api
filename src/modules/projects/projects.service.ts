@@ -20,9 +20,13 @@ import type { UpdateProjectBody } from './projects.schemas.js';
 /** Projects are listed oldest first, with the id as tiebreaker. */
 const SORT = 'createdAt';
 
+/** A cursor names its list: the projects of one workspace. */
+const listScope = (workspaceId: string) => `projects:${workspaceId}`;
+
 function projectCursor(project: Project): string {
+  const scope = listScope(project.workspaceId);
   const value = project.createdAt.toISOString();
-  return encodeCursor({ sort: SORT, order: 'asc', value, id: project.id });
+  return encodeCursor({ scope, sort: SORT, order: 'asc', value, id: project.id });
 }
 
 /**
@@ -30,9 +34,9 @@ function projectCursor(project: Project): string {
  * selects the same rows as "createdAt > v OR (createdAt = v AND id > id0)",
  * but its first half tells Postgres where to start reading the index.
  */
-function afterCursor(raw: string | undefined): Prisma.ProjectWhereInput {
+function afterCursor(workspaceId: string, raw: string | undefined): Prisma.ProjectWhereInput {
   if (raw === undefined) return {};
-  const cursor = decodeCursor(raw, SORT, 'asc');
+  const cursor = decodeCursor(raw, { scope: listScope(workspaceId), sort: SORT, order: 'asc' });
   const createdAt = cursorDateTime(cursor);
   return {
     AND: [
@@ -79,7 +83,7 @@ export class ProjectService {
   async list(workspaceId: string, userId: string, query: PageQuery) {
     await requireMembership(this.prisma, workspaceId, userId);
     const rows = await this.prisma.project.findMany({
-      where: { AND: [{ workspaceId }, afterCursor(query.cursor)] },
+      where: { AND: [{ workspaceId }, afterCursor(workspaceId, query.cursor)] },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       // One more than the page size: if it comes back, there is a next page.
       take: query.limit + 1,
