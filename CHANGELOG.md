@@ -26,7 +26,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   removing a member unassigns their tasks. Lists use keyset (cursor) pagination with
   opaque cursors, filters (status, priority, assignee, due date range, title search) and
   sorting (by creation, last update or due date, with undated tasks last). New quotas limit
-  projects per workspace and tasks per project.
+  projects per workspace (20 by default) and tasks per project (5,000), and together they
+  may not allow more than 100,000 tasks in one workspace.
 - Quality gates: the strictest TypeScript settings, ESLint with the NASA/JPL "Power of Ten"
   rules (including a custom rule that bans recursion), Prettier, Git hooks (Husky,
   lint-staged, commitlint) and a test coverage threshold.
@@ -47,8 +48,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tokens is being rotated: rotation and revocation lock the user's row first.
 - Project and task lookups are scoped by every id in the URL, project and task writes hold a
   shared lock on the workspace so roles and memberships can't change halfway through, and
-  pagination cursors are validated like any other input, including the dates inside them.
-  Title search escapes `LIKE` wildcards.
+  pagination cursors are validated like any other input, including the dates inside them,
+  and only work for the list they were made for. Title search escapes `LIKE` wildcards.
+- No input string may contain the NUL character, which Postgres text can't store: it gets
+  a `400` instead of failing in the database with a `500`.
 - Both Docker images are pinned by digest, run on Node.js 26 LTS as a non-root user and get
   the latest Alpine security fixes. Neither ships npm, and the API image leaves out the
   Prisma CLI.

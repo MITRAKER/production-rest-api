@@ -1409,7 +1409,7 @@ GET …/tasks?status=TODO,IN_PROGRESS&sort=dueDate&order=asc&limit=2
     { "id": "…", "title": "Write the README", "status": "TODO", "dueDate": "2026-11-30", … },
     { "id": "…", "title": "Pick a logo", "status": "IN_PROGRESS", "dueDate": "2026-12-01", … }
   ],
-  "nextCursor": "eyJzb3J0IjoiZHVlRGF0ZSIsIm9yZGVyIjoiYXNjIiwidmFsdWUiOiIyMDI2LTEyLTAxIiwiaWQiOiIwYjlkNmM0My04YzU1LTRjNGUtOWUwZS03ZjlhM2UwZjJhMTEifQ"
+  "nextCursor": "eyJzY29wZSI6InRhc2tzOjdjMWU0YTUyLTNkNTUtNGYwZS04YTc3LTJiOWU2ZjFkMGMzMyIsInNvcnQiOiJkdWVEYXRlIiwib3JkZXIiOiJhc2MiLCJ2YWx1ZSI6IjIwMjYtMTItMDEiLCJpZCI6IjBiOWQ2YzQzLThjNTUtNGM0ZS05ZTBlLTdmOWEzZTBmMmExMSJ9"
 }
 ```
 
@@ -1433,6 +1433,7 @@ is `null`, there are no more pages.
 prisma/migrations/…_projects_and_tasks/migration.sql
 src/lib/pagination.ts                      # cursors, page size, "ask for one more row"
 src/lib/dates.ts                           # calendar dates ("2026-12-31")
+src/lib/text.ts                            # Text: every string input, without the NUL character
 src/modules/projects/projects.access.ts    # requireProject() and lockProject()
 src/modules/projects/…                     # projects: schemas, service, routes
 src/modules/tasks/tasks.schemas.ts         # task bodies, and the filter and sort allow-lists
@@ -1613,14 +1614,25 @@ When a page ends among the undated tasks, the cursor's value is `null`, and the 
 only reads the second stretch. Page boundaries right at the switch from dated to undated
 tasks are covered by the "walk every page" tests.
 
+**Two reads, one snapshot.** By default, each SQL statement sees the database as it is
+when that statement starts. So between our two reads, another request could set or clear
+a task's due date and commit, and one page would then hold that task twice (once in each
+stretch) or not at all. The review reproduced it: while due dates changed, 5 to 26 pages
+out of 1,200 came back wrong. The fix runs both reads in one transaction at the
+**`REPEATABLE READ`** isolation level, where every statement sees the same **snapshot**:
+the database as it was at the transaction's first read. Reads never block writes in
+Postgres, so this costs nothing but the `BEGIN` and `COMMIT`. The test "reads a due-date
+page from one snapshot" changes four due dates while five pages are read, twenty times
+over; with two separate snapshots, it fails in the first rounds.
+
 ### Concept 6: The cursor is opaque, not secret, and validated
 
-The cursor is JSON (the sort, the order, the last task's sort value and its id), encoded
-as **base64url** so it's safe to put in a URL:
+The cursor is JSON (the list it belongs to, the sort, the order, the last task's sort value
+and its id), encoded as **base64url** so it's safe to put in a URL:
 
 ```
-{"sort":"dueDate","order":"asc","value":"2026-12-01","id":"0b9d6c43-…"}
-  → eyJzb3J0IjoiZHVlRGF0ZSIsIm9yZGVyIjoiYXNjIiwidmFsdWUiOiIyMDI2LTEyLTAxIiwiaWQiOi…
+{"scope":"tasks:7c1e4a52-…","sort":"dueDate","order":"asc","value":"2026-12-01","id":"0b9d6c43-…"}
+  → eyJzY29wZSI6InRhc2tzOjdjMWU0YTUyLTNkNTUtNGYwZS04YTc3LTJiOWU2ZjFkMGMzMyIsInNvcnQiOi…
 ```
 
 - **Opaque:** clients must not build or change it, only send it back. That leaves us free
@@ -1632,16 +1644,20 @@ as **base64url** so it's safe to put in a URL:
   With the values, a cursor keeps working even if that task was deleted in the meantime
   (tested).
 - **Validated like any input.** Base64 that isn't JSON, JSON of the wrong shape, an id that
-  isn't a uuid, a value that isn't a timestamp: all `400 INVALID_CURSOR`. The cursor also
-  records the sort and order it was made for, so a "sorted by due date" cursor sent to a
-  "sorted by creation" list is refused, instead of silently returning the wrong tasks.
+  isn't a uuid, a value that isn't a timestamp: all `400 INVALID_CURSOR`.
+- **It only works for the list it came from.** The cursor records its list (the `scope`:
+  `tasks:<projectId>` or `projects:<workspaceId>`) and the sort and order it was made for.
+  A cursor from another project's tasks, or from a list sorted another way, is refused,
+  instead of silently returning a page that makes no sense. (The first version only
+  checked the sort and order; the review found that a cursor from another project, sorted
+  the same way, was accepted.)
 - **Its values are checked, too.** A tampered cursor with the date `0000-01-01` is valid
   ISO 8601, but Postgres has no year 0 and would fail the query: a `500`. So cursor
   timestamps must be from 1970 on and dates from 1900 on. The test "refuses a tampered
   cursor with year 0, with 400 and not 500" is there because of this.
 
 Filters aren't stored in the cursor, so a client should send the same filters with every
-page. (Exercise 7 asks what it would take to enforce that.)
+page. (Exercise 7 asks what it would take to enforce that too.)
 
 ### Concept 7: Filtering and sorting with allow-lists
 
@@ -1767,25 +1783,37 @@ deadlock from chapter 4). Postgres also takes locks you didn't ask for: insertin
 checks its foreign keys with a light `FOR KEY SHARE` lock on the project row and on the
 users it references. Those come at the end, so they keep the order.
 
-A shared lock isn't free: Postgres has to record every transaction holding it on the row
-itself. At thousands of writes per second _in one workspace_ that bookkeeping would start
-to show. This API is nowhere near that.
+A shared lock isn't free. Postgres records row locks in the row itself, which has room for
+one locker; when several transactions share a lock, it keeps their list in a separate
+structure, a **multixact**, and the row points to it. Every shared lock is also a write to
+the row's page. At thousands of writes per second _in one workspace_ that bookkeeping
+would start to show. This API is nowhere near that.
 
 ### Concept 12: The Power of Ten rules in this chapter
 
 **Rule 3: everything has a bound.**
 
-| What                   | Bound                   | Where                                          |
-| ---------------------- | ----------------------- | ---------------------------------------------- |
-| Page size              | default 20, at most 100 | `LIMITS.pageSizeDefault`, `pageSizeMax`        |
-| Cursor length          | 512 characters          | `LIMITS.cursorMaxLength`                       |
-| Projects per workspace | 100 (at most 1,000)     | `MAX_PROJECTS_PER_WORKSPACE`                   |
-| Tasks per project      | 5,000 (at most 100,000) | `MAX_TASKS_PER_PROJECT`, `LIMITS.taskQuotaMax` |
+| What                   | Bound                             | Where                                   |
+| ---------------------- | --------------------------------- | --------------------------------------- |
+| Page size              | default 20, at most 100           | `LIMITS.pageSizeDefault`, `pageSizeMax` |
+| Cursor length          | 512 characters                    | `LIMITS.cursorMaxLength`                |
+| Projects per workspace | 20 (at most 1,000)                | `MAX_PROJECTS_PER_WORKSPACE`            |
+| Tasks per project      | 5,000                             | `MAX_TASKS_PER_PROJECT`                 |
+| Tasks per workspace    | projects × tasks, at most 100,000 | `LIMITS.tasksPerWorkspaceMax`           |
 
 The task list is paginated, so its quota may go above `LIMITS.listMax`: the page size
 bounds the response, and the quota bounds storage and the cost of a search. Even the test
 helper that follows `nextCursor` gives up after 100 pages, so a bug can't make it loop
 forever (rule 2).
+
+**Quotas multiply.** The first version allowed 100 projects of 5,000 tasks: 500,000 tasks
+in one workspace. The review measured what that means for removing a member, which
+unassigns all their tasks in one statement while the workspace is locked: 8.3 seconds for
+a member assigned to 500,000 tasks, close to the 10-second statement timeout. A little more
+and that member could never be removed. So `env.ts` now refuses settings where projects
+per workspace times tasks per project is above 100,000, and the default is 20 projects. At
+100,000 tasks, the same removal took about 1.5 seconds. A bound on each part isn't enough;
+what a request has to touch is what needs the bound.
 
 **Rule 5: assert what can't happen.** `toPage()` asserts that the query returned at most
 `limit + 1` rows. More would mean the query is wrong, and quietly cutting the list would
@@ -1799,6 +1827,34 @@ travel as one object (`ProjectRef`, `TaskRef`), straight from Fastify's `request
 **Rule 7: check every input.** Comma-separated lists are checked item by item, and dates for
 existence and range. `test/input-bounds.test.ts` now covers the project and task schemas
 too (a `date` string has a fixed length, like a `uuid`).
+
+Every string a client sends now also refuses the **NUL character** (`U+0000`, `%00` in a
+URL). It's valid JSON and valid Unicode, but Postgres text can't hold it, so a title or a
+search with one failed in the database: a `500`. The review found it in every text field,
+including the workspace and user names of earlier chapters. Input schemas now start from
+`Text` (`src/lib/text.ts`) instead of `z.string()`, and `input-bounds.test.ts` sends a NUL
+to every free-text field of every input schema (23 of them) and expects the `400`.
+
+### What the review found
+
+Before the pull request, the code was reviewed from three angles (pagination, concurrency
+and security), and every finding was reproduced before it was fixed:
+
+| Found                                     | What could happen                                                                                       | Fix                                                                |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| A due-date page read with two statements  | A task whose due date changed in between was on the page twice, or missing (5 to 26 pages in 1,200)     | Both reads in one `REPEATABLE READ` transaction (Concept 5)        |
+| The NUL character in a text field         | A `500` instead of a `400`, in every text field, the names of earlier chapters included                 | `Text` instead of `z.string()` for every input string (Concept 12) |
+| Cursors only checked their sort and order | A cursor from another project's tasks, sorted the same way, was accepted                                | The cursor records its list (Concept 6)                            |
+| 100 projects × 5,000 tasks per workspace  | Removing a member assigned to 500,000 tasks took 8.3 of the 10 seconds allowed                          | At most 100,000 tasks per workspace (Concept 12)                   |
+| Tests that expected creation order        | Two rows created in the same millisecond are ordered by their random ids, so a test failed now and then | Tests set the timestamps themselves, or compare sets               |
+
+The review also tried these, and found nothing: random and malformed input on every
+endpoint (no other `500`s), many requests racing in one workspace (no deadlock, no broken
+invariant), and a role change waiting behind heavy task traffic (about 40 ms).
+
+The last row is worth remembering. A test that fails "now and then" is a **flaky test**, and
+it's a bug report about the test: here, it assumed that rows created one after the other
+get different timestamps. They usually do, which is exactly why it took a while to show.
 
 ### How we know the tests work
 
@@ -1815,6 +1871,10 @@ meant to catch: we put the bug in on purpose, ran the test, and took the bug out
 | Undated tasks paged in the wrong id direction                 | the "walk every page" test                  |
 | No id tiebreaker                                              | the "walk every page" test                  |
 | The cursor pointing at the extra row, not the last one        | the "walk every page" test                  |
+| Each due-date read with its own snapshot (`READ COMMITTED`)   | the one-snapshot race (5 out of 5)          |
+| The cursor's list (`scope`) not checked                       | the tests with a cursor from another list   |
+| A project name or `q` accepting the NUL character             | the NUL tests (`500` instead of `400`)      |
+| No bound on projects × tasks                                  | the environment validation test             |
 
 This is called **mutation testing**: change the code in a small, wrong way (a "mutant")
 and check that some test fails. A mutant that survives points at a missing test. The query
@@ -1873,4 +1933,6 @@ keyset (cursor) pagination · tiebreaker · total order · index scan · `EXPLAI
 index condition vs filter · backward index scan · `NULLS FIRST` / `NULLS LAST` · opaque
 cursor · base64url · allow-list vs block-list · `LIKE` wildcards and escaping · calendar date
 vs timestamp · `PATCH` semantics (missing vs `null`) · ownership-based permission · shared
-lock (`FOR SHARE`) vs exclusive lock (`FOR UPDATE`) · lock order · mutation testing
+lock (`FOR SHARE`) vs exclusive lock (`FOR UPDATE`) · multixact · lock order · isolation
+level (`READ COMMITTED`, `REPEATABLE READ`) · snapshot · NUL character · mutation testing ·
+flaky test

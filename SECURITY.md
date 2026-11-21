@@ -60,14 +60,16 @@ exactly what we want to hear about.
   same transaction.
 - **Lists** only sort and filter by allow-listed fields and values, and title search escapes
   `LIKE` wildcards. Pagination cursors are opaque but not secret (they hold nothing the page
-  doesn't show), and they are validated like any other input, so a tampered cursor gets
-  `400 INVALID_CURSOR`.
+  doesn't show). They are validated like any other input and only work for the list they
+  were made for, so a tampered or misplaced cursor gets `400 INVALID_CURSOR`.
 - **Invitations** are 256-bit random tokens stored only as SHA-256 hashes. They are
   single-use, expire after 7 days by default, and only work for an account with the invited
   email (see the known limitations below).
 - **Every input is validated and bounded:** a maximum request body size, a maximum length on
   every string, a maximum page size, request and database timeouts, and a fixed database pool
-  size.
+  size. No string may contain the NUL character, which Postgres can't store. Quotas also
+  bound what one request may have to touch: at most 100,000 tasks in a workspace, so even
+  removing a member who is assigned all of them stays well inside the timeouts.
 - **Errors never leak internals:** unexpected errors return a generic 500, and the
   `Authorization` and `Cookie` headers are redacted from the logs.
 - **The Docker images** (the API and the migration job) run as a non-root user, are pinned by
