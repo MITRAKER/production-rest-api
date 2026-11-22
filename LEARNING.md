@@ -858,6 +858,19 @@ package that `eslint-plugin-sonarjs` depends on. SonarJS hadn't released a fix, 
 "overrides": { "eslint-plugin-sonarjs": { "minimatch": "^11.0.9" } }
 ```
 
+It happened again a few days later, and that's normal: advisories are published every day,
+for code that didn't change. `npm audit` started failing on a ReDoS (a regular expression
+that can run for a very long time on crafted input) in `effect`, which the Prisma CLI pins
+at an old version through `@prisma/config`. No Prisma 7 release had the fix yet, and npm's
+own suggestion was a downgrade to Prisma 6. So a second override raises `effect` to the
+first fixed version or later:
+
+```json
+"@prisma/config": { "effect": "^3.22.1" }
+```
+
+An override is a promise to check back: once Prisma ships the fix, it can go.
+
 Licenses matter too: dependency review only allows licenses that are compatible with a
 project shipped under MIT. The list is in `dependency-review.yml`, and growing it is a
 decision to write down. When the Dependency graph was turned on and dependency review
