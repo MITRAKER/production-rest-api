@@ -859,7 +859,12 @@ package that `eslint-plugin-sonarjs` depends on. SonarJS hadn't released a fix, 
 ```
 
 Licenses matter too: dependency review only allows licenses that are compatible with a
-project shipped under MIT.
+project shipped under MIT. The list is in `dependency-review.yml`, and growing it is a
+decision to write down. When the Dependency graph was turned on and dependency review
+really ran for the first time, it stopped at `uri-js`, which ESLint uses: its license is
+BSD-2-Clause plus one sentence saying that the authors' views aren't official policy
+(SPDX calls it `BSD-2-Clause-Views`). That sentence adds no obligation, so the license
+joined the list, with that reason in a comment next to it.
 
 Development dependencies count. Dependency review checks only production (runtime)
 dependencies unless you ask for more, but ESLint plugins and test tools run on your machine and
