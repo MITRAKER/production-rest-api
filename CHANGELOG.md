@@ -35,5 +35,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Both Docker images are pinned by digest, run on Node.js 26 LTS as a non-root user and get
   the latest Alpine security fixes. Neither ships npm, and the API image leaves out the
   Prisma CLI.
+- The Prisma CLI's `effect` dependency is raised to a version without the ReDoS in
+  [GHSA-7589-6fvf-x4pw](https://github.com/advisories/GHSA-7589-6fvf-x4pw), with an npm
+  override, until Prisma ships one.
 
 [Unreleased]: https://github.com/MITRAKER/production-rest-api/commits/main
