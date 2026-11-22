@@ -1,10 +1,14 @@
 /**
  * Power of Ten rule 3, adapted: every resource a request can use has an
- * explicit upper bound, written down in one place (input size, time,
- * database connections). Nothing waits without limit, so one bad client
- * (or one slow query) can't take the whole service down. Stored history,
- * such as old refresh tokens, still accumulates: LEARNING.md chapter 3
- * explains the cleanup this will need.
+ * explicit upper bound (input size, time, database connections, quotas).
+ * Nothing waits without limit, so one bad client (or one slow query) can't
+ * take the whole service down. Stored history, such as old refresh tokens
+ * and used invitations, still accumulates: LEARNING.md chapter 3 explains
+ * the cleanup this will need.
+ *
+ * The fixed limits are here. The ones an operator may tune per deployment
+ * (database pool size, workspace quotas) are environment variables,
+ * validated in env.ts with their own upper bounds.
  */
 export const LIMITS = {
   /** Largest request body accepted. Our biggest JSON payload is well under 1 KB. */
@@ -27,4 +31,6 @@ export const LIMITS = {
   dbIdleTimeoutMs: 30_000,
   /** If a graceful shutdown hasn't finished by then, exit anyway. */
   shutdownTimeoutMs: 10_000,
+  /** No list endpoint ever returns more items than this. */
+  listMax: 1_000,
 } as const;

@@ -81,3 +81,36 @@ export async function signUp(app: FastifyInstance, name: string) {
   const { accessToken, user: created } = await registerUser(app, user);
   return { id: created.id, email: user.email, api: client(app, accessToken) };
 }
+
+export async function invite(api: Client, workspaceId: string, email: string, role = 'MEMBER') {
+  const res = await api.post(`/workspaces/${workspaceId}/invitations`, { email, role });
+  if (res.statusCode !== 201) throw new Error(`invite failed: ${res.body}`);
+  return res.json<{ invitation: { id: string; email: string; role: string }; token: string }>();
+}
+
+type SignedUp = Awaited<ReturnType<typeof signUp>>;
+
+/**
+ * The standard cast for authorization tests, in workspace "Acme":
+ * Alice (OWNER), Bob (ADMIN), Carol (MEMBER), and Dave who is not a member.
+ * Bob and Carol join through the real invitation flow.
+ */
+export async function createTeam(app: FastifyInstance) {
+  const owner = await signUp(app, 'Alice');
+  const admin = await signUp(app, 'Bob');
+  const member = await signUp(app, 'Carol');
+  const outsider = await signUp(app, 'Dave');
+
+  const created = await owner.api.post('/workspaces', { name: 'Acme' });
+  const workspaceId = created.json<{ id: string }>().id;
+
+  const join = async (user: SignedUp, role: string) => {
+    const { token } = await invite(owner.api, workspaceId, user.email, role);
+    const res = await user.api.post('/invitations/accept', { token });
+    if (res.statusCode !== 200) throw new Error(`accept failed: ${res.body}`);
+  };
+  await join(admin, 'ADMIN');
+  await join(member, 'MEMBER');
+
+  return { workspaceId, url: `/workspaces/${workspaceId}`, owner, admin, member, outsider };
+}

@@ -49,6 +49,13 @@ exactly what we want to hear about.
   password. Registration does tell whether an email is already taken (`409`), like most
   sign-up forms; avoiding that would need email verification.
 - **Rate limiting** on the authentication endpoints slows down brute-force attacks.
+- **Workspaces** check membership before anything else, so outsiders get `404` and can't
+  even learn that a workspace exists. Roles are checked in one policy file, and you can only
+  act on people with a lower role than yours. Every change to a workspace runs under a row
+  lock, so simultaneous requests can't leave a workspace without an owner or over a quota.
+- **Invitations** are 256-bit random tokens stored only as SHA-256 hashes. They are
+  single-use, expire after 7 days by default, and only work for an account with the invited
+  email (see the known limitations below).
 - **Every input is validated and bounded:** a maximum request body size, a maximum length on
   every string, request and database timeouts, and a fixed database pool size.
 - **Errors never leak internals:** unexpected errors return a generic 500, and the
@@ -56,6 +63,16 @@ exactly what we want to hear about.
 - **The Docker images** (the API and the migration job) run as a non-root user, are pinned by
   digest and get the latest Alpine security fixes. Neither has npm, npx or yarn, and the API
   image has no development dependencies.
+
+## Known limitations
+
+These are known and planned, so they don't need a report:
+
+- **Email addresses aren't verified yet.** Anyone can register any email address. So if the
+  person invited has no account yet, an invitation link works for whoever registers that
+  email first. Share invitation links only with the person invited.
+- **Stored history grows.** Revoked or used refresh tokens and invitations are kept, and
+  nothing deletes them yet. A cleanup job is planned.
 
 ## How the code is checked
 

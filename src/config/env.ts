@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { z } from 'zod';
+import { LIMITS } from './limits.js';
 
 /**
  * Every setting the app needs, validated once at startup.
@@ -22,6 +23,18 @@ const EnvSchema = z.object({
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
   // Max login/register attempts per IP per minute (brute-force protection).
   AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
+
+  // How long an invitation link stays valid (bounded: Power of Ten rule 3).
+  INVITATION_TTL_DAYS: z.coerce.number().int().min(1).max(30).default(7),
+
+  // Quotas (Power of Ten rule 3): how much a user can have at once
+  // (workspaces, members, pending invitations). Each one is itself capped by
+  // LIMITS.listMax, so every list the API returns stays bounded too. Old rows,
+  // like revoked or used invitations, still accumulate: LEARNING.md chapter 4
+  // (Rule 3) explains the cleanup this will need.
+  MAX_WORKSPACES_PER_USER: z.coerce.number().int().min(1).max(LIMITS.listMax).default(50),
+  MAX_MEMBERS_PER_WORKSPACE: z.coerce.number().int().min(1).max(LIMITS.listMax).default(200),
+  MAX_PENDING_INVITATIONS: z.coerce.number().int().min(1).max(LIMITS.listMax).default(50),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
