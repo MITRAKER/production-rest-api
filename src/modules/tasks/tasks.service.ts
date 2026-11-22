@@ -20,6 +20,7 @@ import { can } from '../workspaces/workspaces.policy.js';
 import {
   afterTimestamp,
   datedAfter,
+  dueDateOrder,
   taskCursor,
   taskFilters,
   taskListScope,
@@ -167,7 +168,7 @@ export class TaskService {
       // The previous page already ended among the undated tasks.
       return this.prisma.task.findMany({
         where: { AND: [where, undatedAfter(order, cursor.id)] },
-        orderBy: { id: order },
+        orderBy: dueDateOrder(order),
         take,
       });
     }
@@ -185,13 +186,13 @@ export class TaskService {
       async (tx) => {
         const first = await tx.task.findMany({
           where: { AND: [where, dated] },
-          orderBy: [{ dueDate: order }, { id: order }],
+          orderBy: dueDateOrder(order),
           take,
         });
         if (first.length === take) return first;
         const rest = await tx.task.findMany({
           where: { AND: [where, { dueDate: null }] },
-          orderBy: { id: order },
+          orderBy: dueDateOrder(order),
           take: take - first.length,
         });
         return [...first, ...rest];

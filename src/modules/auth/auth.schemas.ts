@@ -25,7 +25,12 @@ export const RegisterBody = z.object({
 
 export const LoginBody = z.object({
   email: Email,
-  password: Text.min(1).max(128),
+  // Not Text, on purpose. A login must accept every password that sign-up
+  // ever accepted, or it locks those accounts out for good (there's no
+  // password reset yet). Sign-up took any string before Text existed, and
+  // that's harmless here: a password is only hashed and compared, never
+  // stored, so the database never sees it.
+  password: z.string().min(1).max(128),
 });
 
 export const RefreshBody = z.object({

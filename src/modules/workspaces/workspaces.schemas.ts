@@ -1,12 +1,12 @@
 import { z } from 'zod';
+import { Id } from '../../lib/ids.js';
 import { Text } from '../../lib/text.js';
 
 export const Role = z.enum(['OWNER', 'ADMIN', 'MEMBER']);
 
-// Path parameters are user input too. Validating the uuid format turns a
-// malformed id into a clean 400, instead of a database error (500).
-export const WorkspaceParams = z.object({ workspaceId: z.uuid() });
-export const MemberParams = WorkspaceParams.extend({ userId: z.uuid() });
+// Path parameters are user input too: each id is checked and lower-cased (src/lib/ids.ts).
+export const WorkspaceParams = z.object({ workspaceId: Id });
+export const MemberParams = WorkspaceParams.extend({ userId: Id });
 
 const Name = Text.trim().min(1).max(100);
 

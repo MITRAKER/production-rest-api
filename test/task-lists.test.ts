@@ -293,6 +293,22 @@ describe('sorting and paging', () => {
     }
   });
 
+  it('pages through a list whose URL spells the ids in capitals', async () => {
+    // Some clients write UUIDs in upper case (Swift's uuidString does). The
+    // cursor names its list by the project id, so before ids were lower-cased
+    // on the way in, page 2 failed with INVALID_CURSOR.
+    const team = await createTeamWithProject(app);
+    for (const title of ['One', 'Two', 'Three']) {
+      await createTask(team.owner.api, team.tasksUrl, { title });
+    }
+    const project = team.project.id.toUpperCase();
+    const url = `/workspaces/${team.workspaceId.toUpperCase()}/projects/${project}/tasks`;
+    for (const sort of ['createdAt', 'dueDate']) {
+      const tasks = await walk(team.owner.api, url, `limit=1&sort=${sort}`);
+      expect(sorted(titles(tasks))).toEqual(['One', 'Three', 'Two']);
+    }
+  });
+
   it('returns 20 tasks per page by default', async () => {
     const team = await createTeamWithProject(app);
     await app.prisma.task.createMany({

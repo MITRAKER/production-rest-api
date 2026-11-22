@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { IsoDay } from '../../lib/dates.js';
+import { Id } from '../../lib/ids.js';
 import { pageOf, PageQuery } from '../../lib/pagination.js';
 import { Text } from '../../lib/text.js';
 import { ProjectParams } from '../projects/projects.schemas.js';
@@ -7,7 +8,7 @@ import { ProjectParams } from '../projects/projects.schemas.js';
 export const TaskStatus = z.enum(['TODO', 'IN_PROGRESS', 'DONE']);
 export const TaskPriority = z.enum(['LOW', 'MEDIUM', 'HIGH']);
 
-export const TaskParams = ProjectParams.extend({ taskId: z.uuid() });
+export const TaskParams = ProjectParams.extend({ taskId: Id });
 
 const Title = Text.trim().min(1).max(200);
 const Description = Text.max(5_000);
@@ -19,7 +20,7 @@ export const CreateTaskBody = z.object({
   priority: TaskPriority.default('MEDIUM'),
   // Leaving these out (or sending null) means "no due date" and "unassigned".
   dueDate: IsoDay.nullable().default(null),
-  assigneeId: z.uuid().nullable().default(null),
+  assigneeId: Id.nullable().default(null),
 });
 
 // PATCH changes only the fields that are sent, but at least one must be.
@@ -32,7 +33,7 @@ export const UpdateTaskBody = z
     status: TaskStatus,
     priority: TaskPriority,
     dueDate: IsoDay.nullable(),
-    assigneeId: z.uuid().nullable(),
+    assigneeId: Id.nullable(),
   })
   .partial()
   .refine((body) => Object.keys(body).length > 0, { message: 'Send at least one field to change' });
@@ -50,7 +51,7 @@ export const TaskListQuery = PageQuery.extend({
   status: CommaList.pipe(z.array(TaskStatus).min(1).max(3)).optional(),
   priority: CommaList.pipe(z.array(TaskPriority).min(1).max(3)).optional(),
   // A member's id, or "none" for the tasks nobody is assigned to.
-  assigneeId: z.union([z.uuid(), z.literal('none')]).optional(),
+  assigneeId: z.union([Id, z.literal('none')]).optional(),
   // Both inclusive: dueFrom=2026-12-01&dueTo=2026-12-31 is all of December.
   dueFrom: IsoDay.optional(),
   dueTo: IsoDay.optional(),

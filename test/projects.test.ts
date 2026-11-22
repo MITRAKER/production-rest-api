@@ -69,6 +69,7 @@ describe('POST /workspaces/:workspaceId/projects', () => {
     ['a name that is too long', { name: 'x'.repeat(101) }],
     ['a description that is too long', { name: 'X', description: 'x'.repeat(2001) }],
     ['a name with the NUL character, which Postgres text cannot hold', { name: 'a\u0000b' }],
+    ['a name with an unpaired surrogate, which is not a character', { name: 'a\uDE00b' }],
     ['no name', { description: 'only this' }],
   ])('rejects %s', async (_label, payload) => {
     const team = await createTeam(app);
@@ -88,7 +89,7 @@ describe('GET /workspaces/:workspaceId/projects/:projectId', () => {
     }
   });
 
-  it('answers 404 to outsiders, for unknown ids, and for malformed ids', async () => {
+  it('answers 404 to outsiders and for unknown ids, and 400 for malformed ids', async () => {
     const team = await createTeamWithProject(app);
     expect((await team.outsider.api.get(team.projectUrl)).statusCode).toBe(404);
     const unknown = `${team.url}/projects/00000000-0000-4000-8000-000000000000`;
@@ -162,12 +163,23 @@ describe('GET /workspaces/:workspaceId/projects', () => {
   });
 
   it('returns 20 per page by default', async () => {
-    const team = await teamWithProjects(1);
-    const res = await team.owner.api.get(`${team.url}/projects`);
-    expect(res.json()).toEqual({
-      data: [expect.objectContaining({ name: 'Project 0' })],
-      nextCursor: null,
-    });
+    const team = await teamWithProjects(21);
+    const page = (await team.owner.api.get(`${team.url}/projects`)).json<PageJson<ProjectJson>>();
+    expect(page.data).toHaveLength(20);
+    expect(page.data[0]?.name).toBe('Project 0');
+    expect(page.nextCursor).toEqual(expect.any(String));
+  });
+
+  it('pages through the list when the URL spells the workspace id in capitals', async () => {
+    // Some clients write UUIDs in upper case (Swift's uuidString does). The
+    // cursor names its list by the workspace id, so before ids were
+    // lower-cased on the way in, page 2 failed with INVALID_CURSOR.
+    const team = await teamWithProjects(3);
+    const url = `/workspaces/${team.workspaceId.toUpperCase()}/projects?limit=2`;
+    const page1 = (await team.owner.api.get(url)).json<PageJson<ProjectJson>>();
+    const page2 = await team.owner.api.get(`${url}&cursor=${String(page1.nextCursor)}`);
+    expect(page2.statusCode).toBe(200);
+    expect(page2.json().data.map((p: ProjectJson) => p.name)).toEqual(['Project 2']);
   });
 
   it('keeps working when the project a cursor points at is deleted', async () => {

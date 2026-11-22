@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { NUL_MESSAGE } from '../src/lib/text.js';
+import { NUL_MESSAGE, UNICODE_MESSAGE } from '../src/lib/text.js';
 import * as authSchemas from '../src/modules/auth/auth.schemas.js';
 import * as invitationSchemas from '../src/modules/invitations/invitations.schemas.js';
 import * as projectSchemas from '../src/modules/projects/projects.schemas.js';
@@ -14,8 +14,9 @@ import * as workspaceSchemas from '../src/modules/workspaces/workspaces.schemas.
  * - Power of Ten rule 3: every value a client can send has an upper bound.
  *   Each schema is converted to JSON Schema, and every string must have a
  *   maxLength (or a fixed format) and every array a maxItems.
- * - No string may contain the NUL character, which Postgres text can't hold
- *   (see src/lib/text.ts).
+ * - No free-text string may contain the NUL character, which Postgres text
+ *   can't hold, or half of a UTF-16 surrogate pair, which the database driver
+ *   would quietly change (see src/lib/text.ts).
  *
  * When you add a schema module, add it to `modules` below.
  */
@@ -108,25 +109,44 @@ function freeTextFields(json: JsonNode): string[] {
     .map(([field]) => field);
 }
 
+/**
+ * Free-text fields that accept any string, each for a reason. The login
+ * password must keep accepting every password that sign-up once did (see
+ * LoginBody); it is only hashed, never stored.
+ */
+const ANY_STRING = new Set(['auth.LoginBody.password']);
+
 const textFields = inputSchemas.flatMap(({ name, schema }) =>
   freeTextFields(toJson(schema)).map((field) => ({ name: `${name}.${field}`, schema, field })),
 );
 
-describe('no client string may contain NUL (U+0000)', () => {
+/** The messages the field gives for this value (only the field's own issues). */
+function messagesFor(entry: (typeof textFields)[number], value: string): string[] {
+  const result = entry.schema.safeParse({ [entry.field]: value });
+  const issues = result.error?.issues ?? [];
+  return issues.filter((issue) => issue.path[0] === entry.field).map((issue) => issue.message);
+}
+
+describe('no client string may contain NUL (U+0000) or an unpaired surrogate', () => {
   it('finds the free-text fields', () => {
     const names = textFields.map((f) => f.name);
     expect(names).toContain('auth.RegisterBody.password');
     expect(names).toContain('projects.CreateProjectBody.description');
     expect(names).toContain('tasks.TaskListQuery.q');
     expect(names).toContain('tasks.TaskListQuery.cursor');
+    // Every exception is still a free-text field, so the list can't go stale.
+    for (const name of ANY_STRING) expect(names).toContain(name);
   });
 
-  for (const { name, schema, field } of textFields) {
-    it(name, () => {
-      const result = schema.safeParse({ [field]: 'some text\u0000' });
-      const issues = result.error?.issues ?? [];
-      const messages = issues.filter((issue) => issue.path[0] === field).map((i) => i.message);
-      expect(messages).toContain(NUL_MESSAGE);
+  for (const entry of textFields.filter((f) => !ANY_STRING.has(f.name))) {
+    it(entry.name, () => {
+      expect(messagesFor(entry, 'some text\u0000')).toContain(NUL_MESSAGE);
+      expect(messagesFor(entry, 'some text\uD800')).toContain(UNICODE_MESSAGE);
+      expect(messagesFor(entry, 'some text \uDE00 reversed \uDE00\uD83D')).toContain(
+        UNICODE_MESSAGE,
+      );
+      // A whole surrogate pair is one character, and fine.
+      expect(messagesFor(entry, 'some text \uD83D\uDE00')).not.toContain(UNICODE_MESSAGE);
     });
   }
 });

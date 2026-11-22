@@ -50,6 +50,21 @@ export function timestampOrder(sort: TimestampSort, order: SortOrder) {
 }
 
 /**
+ * ORDER BY dueDate, then id: for both parts of a due-date list, the tasks with
+ * a due date and those without. For the second part every due date is NULL,
+ * so this is simply "by id", and yet the dueDate must stay. Postgres treats a
+ * column as fixed only when it's compared with "=", and "due_date IS NULL"
+ * isn't one: ordered by id alone, it doesn't see that the (project_id,
+ * due_date, id) index already holds those tasks in id order, and walks the
+ * primary key through the tasks of every project instead (measured: 1,924
+ * rows read and thrown away for a page of 21). With the dueDate, it reads
+ * exactly the stretch of undated tasks.
+ */
+export function dueDateOrder(order: SortOrder): Prisma.TaskOrderByWithRelationInput[] {
+  return [{ dueDate: order }, { id: order }];
+}
+
+/**
  * The tasks after the position (value, id), sorted by a column that is never
  * null. "column >= v AND (column > v OR id > id0)" selects the same rows as
  * the shorter "column > v OR (column = v AND id > id0)", but its first half

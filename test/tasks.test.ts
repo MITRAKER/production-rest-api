@@ -8,6 +8,7 @@ import {
   invite,
   resetDb,
   signUp,
+  sleep,
   warmUpPool,
 } from './helpers.js';
 
@@ -83,6 +84,8 @@ describe('POST .../projects/:projectId/tasks', () => {
     ['a title that is too long', { title: 'x'.repeat(201) }],
     ['a description that is too long', { title: 'X', description: 'x'.repeat(5001) }],
     ['the NUL character, which Postgres text cannot hold', { title: 'X', description: 'a\u0000' }],
+    // Half of a surrogate pair: the driver would store U+FFFD instead (a 201, with another title).
+    ['an unpaired surrogate, which is not a character', { title: 'a\uD800b' }],
     ['an unknown status', { title: 'X', status: 'DOING' }],
     ['an unknown priority', { title: 'X', priority: 'URGENT' }],
     ['a day that does not exist', { title: 'X', dueDate: '2026-02-30' }],
@@ -113,7 +116,7 @@ describe('POST .../projects/:projectId/tasks', () => {
 });
 
 describe('GET .../tasks/:taskId', () => {
-  it('lets members read a task; everyone else, and every wrong URL, gets 404', async () => {
+  it('lets members read a task; outsiders and wrong ids get 404, a malformed id 400', async () => {
     const team = await createTeamWithProject(app);
     const task = await createTask(team.owner.api, team.tasksUrl);
     const otherProject = await createProject(team.owner.api, team.workspaceId, 'Other');
@@ -287,6 +290,37 @@ describe('tasks and membership changes', () => {
       expect(await app.prisma.task.count({ where: { assigneeId: dana.id } })).toBe(0);
     }
   });
+
+  it('lets the owner remove a member who keeps editing a task: the locks are fair', async () => {
+    // Every edit shares the workspace lock; a removal needs it alone. With
+    // row locks (FOR SHARE), new edits kept joining the shared lock while the
+    // removal waited, so it failed after the 10-second timeout with a 500.
+    // Now a waiting removal gets the next turn (workspaces.access.ts).
+    const team = await createTeamWithProject(app);
+    const task = await createTask(team.member.api, team.tasksUrl);
+    await warmUpPool(app, 10);
+
+    const stop = { now: false };
+    const codes: number[] = [];
+    const loops = Array.from({ length: 8 }, async () => {
+      // Power of Ten rule 2: bounded, even in a test.
+      for (let i = 0; !stop.now && i < 10_000; i++) {
+        const res = await team.member.api.patch(`${team.tasksUrl}/${task.id}`, {
+          title: `Edit ${String(i)}`,
+        });
+        codes.push(res.statusCode);
+      }
+    });
+    await sleep(200);
+    const removal = await team.owner.api.delete(`${team.url}/members/${team.member.id}`);
+    stop.now = true;
+    await Promise.all(loops);
+
+    expect(removal.statusCode).toBe(204);
+    expect(codes).toContain(200); // the edits were really running
+    // Each edit came before the removal (200) or after it (404).
+    for (const code of new Set(codes)) expect([200, 404]).toContain(code);
+  }, 20_000);
 
   it('a task created while its project is deleted is either refused (404) or deleted with it', async () => {
     const team = await createTeamWithProject(app);

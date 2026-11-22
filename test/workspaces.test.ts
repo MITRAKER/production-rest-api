@@ -303,6 +303,16 @@ describe('DELETE /workspaces/:workspaceId/members/:userId (remove / leave)', () 
     expect(ownerLeaves.json().error.code).toBe('LAST_OWNER');
   });
 
+  it('treats your own id as yours in any letter case', async () => {
+    // Removing yourself is leaving, which any member may do. Before ids were
+    // lower-cased on the way in, Carol's id in capitals didn't equal her id
+    // as text, so she was "removing someone else", and got a 403.
+    const team = await createTeam(app);
+    const res = await team.member.api.delete(`${team.url}/members/${team.member.id.toUpperCase()}`);
+    expect(res.statusCode).toBe(204);
+    expect((await team.member.api.get(team.url)).statusCode).toBe(404);
+  });
+
   it('keeps one owner even when two owners leave at the same instant', async () => {
     const team = await createTeam(app);
     await team.owner.api.patch(`${team.url}/members/${team.admin.id}`, { role: 'OWNER' });

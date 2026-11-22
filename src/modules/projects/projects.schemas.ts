@@ -1,9 +1,10 @@
 import { z } from 'zod';
+import { Id } from '../../lib/ids.js';
 import { pageOf, PageQuery } from '../../lib/pagination.js';
 import { Text } from '../../lib/text.js';
 import { WorkspaceParams } from '../workspaces/workspaces.schemas.js';
 
-export const ProjectParams = WorkspaceParams.extend({ projectId: z.uuid() });
+export const ProjectParams = WorkspaceParams.extend({ projectId: Id });
 
 const Name = Text.trim().min(1).max(100);
 const Description = Text.max(2_000);
