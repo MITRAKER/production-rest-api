@@ -47,11 +47,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Logging out, or reusing an old refresh token, ends the session even while one of its
   tokens is being rotated: rotation and revocation lock the user's row first.
 - Project and task lookups are scoped by every id in the URL, project and task writes hold a
-  shared lock on the workspace so roles and memberships can't change halfway through, and
-  pagination cursors are validated like any other input, including the dates inside them,
-  and only work for the list they were made for. Title search escapes `LIKE` wildcards.
+  shared lock on the workspace so roles and memberships can't change halfway through (an
+  advisory lock with a fair queue, so a stream of task edits can't hold up a member's
+  removal), and pagination cursors are validated like any other input, including the dates
+  inside them, and only work for the list they were made for. Title search escapes `LIKE`
+  wildcards.
 - No input string may contain the NUL character, which Postgres text can't store: it gets
-  a `400` instead of failing in the database with a `500`.
+  a `400` instead of failing in the database with a `500`. Half of a UTF-16 surrogate pair
+  gets a `400` too, instead of being stored as `�`. The login password is the exception: it
+  is never stored, and accounts created before this rule must still be able to log in.
+- Ids from clients are lower-cased, so ids written in capitals work everywhere, including
+  the next page of a list and leaving a workspace.
 - Both Docker images are pinned by digest, run on Node.js 26 LTS as a non-root user and get
   the latest Alpine security fixes. Neither ships npm, and the API image leaves out the
   Prisma CLI.

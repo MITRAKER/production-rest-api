@@ -51,25 +51,31 @@ exactly what we want to hear about.
 - **Rate limiting** on the authentication endpoints slows down brute-force attacks.
 - **Workspaces** check membership before anything else, so outsiders get `404` and can't
   even learn that a workspace exists. Roles are checked in one policy file, and you can only
-  act on people with a lower role than yours. Every change to a workspace runs under a row
-  lock, so simultaneous requests can't leave a workspace without an owner or over a quota.
+  act on people with a lower role than yours. Every change to a workspace runs under a lock
+  on that workspace, so simultaneous requests can't leave it without an owner or over a
+  quota.
 - **Projects and tasks** are looked up by every id in their URL (workspace, project and
   task), so an id from another workspace is simply not found (`404`). Their changes hold a
   shared lock on the workspace, so a role or membership can't change halfway through one.
-  Tasks can only be assigned to members, and removing a member unassigns their tasks in the
-  same transaction.
+  The lock keeps a fair queue: once a membership change is waiting, new changes wait behind
+  it, so no stream of requests can hold up removing a member. Tasks can only be assigned to
+  members, and removing a member unassigns their tasks in the same transaction.
 - **Lists** only sort and filter by allow-listed fields and values, and title search escapes
   `LIKE` wildcards. Pagination cursors are opaque but not secret (they hold nothing the page
-  doesn't show). They are validated like any other input and only work for the list they
-  were made for, so a tampered or misplaced cursor gets `400 INVALID_CURSOR`.
+  doesn't show). They are validated like any other input: a malformed cursor, one with
+  values out of range, or one made for another list or sort order gets
+  `400 INVALID_CURSOR`. Cursors aren't signed, so an edited cursor that is still valid is
+  accepted; it can only change where the caller resumes a list they can already read.
 - **Invitations** are 256-bit random tokens stored only as SHA-256 hashes. They are
   single-use, expire after 7 days by default, and only work for an account with the invited
   email (see the known limitations below).
 - **Every input is validated and bounded:** a maximum request body size, a maximum length on
   every string, a maximum page size, request and database timeouts, and a fixed database pool
-  size. No string may contain the NUL character, which Postgres can't store. Quotas also
-  bound what one request may have to touch: at most 100,000 tasks in a workspace, so even
-  removing a member who is assigned all of them stays well inside the timeouts.
+  size. No string that is stored or searched may contain the NUL character, which Postgres
+  can't store, or half of a UTF-16 surrogate pair, which would be stored changed. Ids are
+  accepted in any letter case and compared in lower case. Quotas also bound what one request
+  may have to touch: at most 100,000 tasks in a workspace, so even removing a member who is
+  assigned all of them stays well inside the timeouts.
 - **Errors never leak internals:** unexpected errors return a generic 500, and the
   `Authorization` and `Cookie` headers are redacted from the logs.
 - **The Docker images** (the API and the migration job) run as a non-root user, are pinned by

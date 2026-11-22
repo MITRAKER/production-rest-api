@@ -18,20 +18,20 @@ and tasks.
 
 ## Tech stack
 
-| Area          | Choice                                                                        |
-| ------------- | ----------------------------------------------------------------------------- |
-| Language      | TypeScript 6 (strictest settings) on Node.js 26 LTS                           |
-| Web framework | Fastify 5                                                                     |
-| Database      | PostgreSQL 16 with Prisma ORM                                                 |
-| Validation    | Zod (via fastify-type-provider-zod)                                           |
-| Auth          | JWT access tokens, rotating refresh tokens, argon2id, rate limiting           |
-| Authorization | Role-based (owner / admin / member), with row locks protecting the invariants |
-| API design    | Nested resources, keyset (cursor) pagination, allow-listed filters and sorts  |
-| Testing       | Vitest against a real Postgres, with a coverage threshold                     |
-| Code quality  | ESLint with the NASA/JPL "Power of Ten" rules, Prettier, commitlint, Husky    |
-| Security      | CodeQL, dependency review, npm audit, Trivy, OpenSSF Scorecard, Dependabot    |
-| Packaging     | Docker (multi-stage, pinned by digest, non-root) and Docker Compose           |
-| CI/CD         | GitHub Actions; tagged releases publish images to GitHub Container Registry   |
+| Area          | Choice                                                                             |
+| ------------- | ---------------------------------------------------------------------------------- |
+| Language      | TypeScript 6 (strictest settings) on Node.js 26 LTS                                |
+| Web framework | Fastify 5                                                                          |
+| Database      | PostgreSQL 16 with Prisma ORM                                                      |
+| Validation    | Zod (via fastify-type-provider-zod)                                                |
+| Auth          | JWT access tokens, rotating refresh tokens, argon2id, rate limiting                |
+| Authorization | Role-based (owner / admin / member), with database locks protecting the invariants |
+| API design    | Nested resources, keyset (cursor) pagination, allow-listed filters and sorts       |
+| Testing       | Vitest against a real Postgres, with a coverage threshold                          |
+| Code quality  | ESLint with the NASA/JPL "Power of Ten" rules, Prettier, commitlint, Husky         |
+| Security      | CodeQL, dependency review, npm audit, Trivy, OpenSSF Scorecard, Dependabot         |
+| Packaging     | Docker (multi-stage, pinned by digest, non-root) and Docker Compose                |
+| CI/CD         | GitHub Actions; tagged releases publish images to GitHub Container Registry        |
 
 ## Getting started
 

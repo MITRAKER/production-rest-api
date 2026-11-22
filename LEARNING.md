@@ -1188,7 +1188,9 @@ SELECT id FROM workspaces WHERE id = $1 FOR UPDATE
 `FOR UPDATE` locks that workspace row until the transaction ends. A second request for the
 same workspace waits at that line until the first one commits. So the operations happen one
 at a time per workspace (other workspaces aren't affected), and the second one counts
-owners _after_ the first has finished.
+owners _after_ the first has finished. (Chapter 5 adds a shared version of this lock for
+task writes, and with it replaces the row lock by an advisory lock, which keeps a fair
+queue. Chapter 5, Concept 11, explains why.)
 
 Two details matter:
 
@@ -1451,7 +1453,8 @@ is `null`, there are no more pages.
 prisma/migrations/…_projects_and_tasks/migration.sql
 src/lib/pagination.ts                      # cursors, page size, "ask for one more row"
 src/lib/dates.ts                           # calendar dates ("2026-12-31")
-src/lib/text.ts                            # Text: every string input, without the NUL character
+src/lib/text.ts                            # Text: string inputs, without NUL or half characters
+src/lib/ids.ts                             # Id: the uuids clients send, lower-cased
 src/modules/projects/projects.access.ts    # requireProject() and lockProject()
 src/modules/projects/…                     # projects: schemas, service, routes
 src/modules/tasks/tasks.schemas.ts         # task bodies, and the filter and sort allow-lists
@@ -1462,8 +1465,9 @@ test/projects.test.ts, test/tasks.test.ts  # endpoints, roles, IDOR, races
 test/task-lists.test.ts                    # filters, sorting, and walking through every page
 ```
 
-`workspaces.policy.ts` gained three actions, `workspaces.access.ts` a shared lock
-(Concept 11), and removing a member now unassigns their tasks.
+`workspaces.policy.ts` gained three actions, `workspaces.access.ts` a shared lock and
+advisory locks that wait in a fair queue (Concept 11), and removing a member now unassigns
+their tasks.
 
 ### Concept 1: Nested resources stay inside their tenant
 
@@ -1531,9 +1535,10 @@ total (counting reads every row, which is exactly what we wanted to avoid). For 
 infinite scrolling and syncing, that's the right trade, and it's how most large APIs
 paginate (Stripe, Slack, and GitHub's GraphQL API, for example).
 
-**Ask for one more row.** To know whether there's a next page, `toPage()` asks the
-database for `limit + 1` rows. If the extra row comes back, a next page exists, and the
-cursor points at the last row actually returned. The extra row itself isn't returned.
+**Ask for one more row.** To know whether there's a next page, the service asks the
+database for `limit + 1` rows (`take: query.limit + 1`). Then `toPage()` turns them into a
+page: if the extra row came back, a next page exists, and the cursor points at the last row
+actually returned. The extra row itself isn't returned.
 
 ### Concept 3: The order must be total: add the id as a tiebreaker
 
@@ -1561,9 +1566,9 @@ The condition above is correct, but Postgres can't use the index well with it. H
 halfway through a list of 5,000 tasks:
 
 ```
-Index Only Scan using tasks_project_id_created_at_id_idx on tasks (actual rows=21)
+Index Scan using tasks_project_id_created_at_id_idx on tasks (actual rows=21)
   Index Cond: (project_id = '…')
-  Filter: ((created_at > '…') OR ((created_at = '…') AND (id > '…')))
+  Filter: ((workspace_id = '…') AND ((created_at > '…') OR ((created_at = '…') AND (id > '…'))))
   Rows Removed by Filter: 2500
 ```
 
@@ -1580,14 +1585,16 @@ a row with `createdAt = v` passes both only if `id > lastId`; an earlier row fai
 But its first half is a place Postgres can start reading from:
 
 ```
-Index Only Scan using tasks_project_id_created_at_id_idx on tasks (actual rows=21)
+Index Scan using tasks_project_id_created_at_id_idx on tasks (actual rows=21)
   Index Cond: ((project_id = '…') AND (created_at >= '…'))
-  Filter: ((created_at > '…') OR (id > '…'))
+  Filter: ((workspace_id = '…') AND ((created_at > '…') OR (id > '…')))
   Rows Removed by Filter: 1
 ```
 
 One row thrown away instead of 2,500: only the ties at exactly `v` are read for nothing.
-`afterTimestamp()` in `tasks.query.ts` builds this condition.
+`afterTimestamp()` in `tasks.query.ts` builds this condition. (The `Filter` also checks
+`workspace_id`, which every query adds (Concept 1) and this index doesn't hold. All of a
+project's tasks are in one workspace, so that check never throws anything away.)
 
 For `order=desc`, every comparison flips (`<=`, `<`) and Postgres reads the same index
 **backward** (`Index Scan Backward` in the plan), so one index serves both directions.
@@ -1628,6 +1635,31 @@ So `TaskService` reads a page sorted by due date from **two stretches** of the
    id. In the index, the `NULL`s sit together at one end, sorted by the next column (`id`),
    so they are a stretch too.
 
+**Ask for the order the index has.** The first version sorted that second read by `id`
+alone. Every due date in it is `NULL`, so sorting by the due date first changes nothing,
+or so it seems. But Postgres only treats a column as fixed when the condition is `=`, and
+`due_date IS NULL` isn't one. So it didn't know that the undated tasks are already in id
+order in the index, and walked the primary key instead, through the tasks of every project:
+
+```
+Index Scan using tasks_pkey on tasks (actual rows=21)
+  Filter: ((due_date IS NULL) AND (project_id = '…') AND (workspace_id = '…'))
+  Rows Removed by Filter: 1924
+```
+
+Sorted by `due_date, id`, the order the index is in, it reads exactly the stretch it needs
+(here, after a cursor):
+
+```
+Index Scan using tasks_project_id_due_date_id_idx on tasks (actual rows=21)
+  Index Cond: ((project_id = '…') AND (due_date IS NULL) AND (id > '…'))
+  Filter: (workspace_id = '…')
+```
+
+Both return the same rows in the same order, so no test can tell them apart; only the plan
+shows the difference. `dueDateOrder()` in `tasks.query.ts` gives both reads the index's
+order, and its comment says why, so that nobody "simplifies" it back.
+
 When a page ends among the undated tasks, the cursor's value is `null`, and the next page
 only reads the second stretch. Page boundaries right at the switch from dated to undated
 tasks are covered by the "walk every page" tests.
@@ -1656,8 +1688,10 @@ and its id), encoded as **base64url** so it's safe to put in a URL:
 - **Opaque:** clients must not build or change it, only send it back. That leaves us free
   to change what's inside later.
 - **Not secret:** anyone can decode base64. That's fine, because the cursor holds nothing
-  the client didn't already see in the page. (If it had to be tamper-proof, we would sign
-  it with an HMAC, like a JWT.)
+  the client didn't already see in the page. It isn't signed either, so an edited cursor
+  that is still valid is accepted; all it can change is where the client resumes a list it
+  may read anyway. (If it had to be tamper-proof, we would sign it with an HMAC, like a
+  JWT.)
 - **It carries values, not only an id.** "After task X" would need task X to still exist.
   With the values, a cursor keeps working even if that task was deleted in the meantime
   (tested).
@@ -1668,7 +1702,8 @@ and its id), encoded as **base64url** so it's safe to put in a URL:
   A cursor from another project's tasks, or from a list sorted another way, is refused,
   instead of silently returning a page that makes no sense. (The first version only
   checked the sort and order; the review found that a cursor from another project, sorted
-  the same way, was accepted.)
+  the same way, was accepted.) Both sides of that comparison must spell the id the same
+  way, which is why ids are lower-cased on the way in (Concept 12).
 - **Its values are checked, too.** A tampered cursor with the date `0000-01-01` is valid
   ISO 8601, but Postgres has no year 0 and would fail the query: a `500`. So cursor
   timestamps must be from 1970 on and dates from 1900 on. The test "refuses a tampered
@@ -1753,21 +1788,21 @@ if (task.createdById !== userId && !can(membership.role, 'tasks:deleteAny')) {
 }
 ```
 
-### Concept 11: Shared and exclusive locks, and a fixed lock order
+### Concept 11: Shared and exclusive locks, a fair queue, and a fixed lock order
 
 Chapter 4's rule was "lock, then check, then write", and it applies here too. But task edits
 are frequent and come from every member, and making them wait for one another would be
-wasteful. Postgres has row locks of different strengths for this:
+wasteful. So the workspace lock comes in two strengths:
 
-| Lock                     | How many at once | Used by                                                             |
-| ------------------------ | ---------------- | ------------------------------------------------------------------- |
-| `FOR UPDATE` (exclusive) | one transaction  | membership and role changes, workspace renames, creating a project  |
-| `FOR SHARE` (shared)     | many             | editing and deleting projects; creating, editing and deleting tasks |
+| Lock                             | How many at once | Used by                                                             |
+| -------------------------------- | ---------------- | ------------------------------------------------------------------- |
+| `lockWorkspace()` (exclusive)    | one transaction  | membership and role changes, workspace renames, creating a project  |
+| `lockWorkspaceShared()` (shared) | many             | editing and deleting projects; creating, editing and deleting tasks |
 
-The two conflict: while any task write holds the shared lock on the workspace row, no
-membership or role can change, and the other way round. That keeps true, until we commit,
-what we checked at the start: that the caller is still a member with the right role, and
-that the new assignee is still a member.
+The two conflict: while any task write holds the shared lock, no membership or role can
+change, and the other way round. That keeps true, until we commit, what we checked at the
+start: that the caller is still a member with the right role, and that the new assignee is
+still a member.
 
 That last one is an invariant: **a task is only ever assigned to a member**. Removing a
 member unassigns their tasks, in the same transaction. Without the shared lock, this could
@@ -1783,8 +1818,36 @@ assigned to someone who's no longer a member. The test "never leaves a task assi
 someone who is no longer a member, even under a race" removes Dana while four requests
 assign her, four times over. Without the shared lock, it failed in 5 runs out of 5.
 
+**A shared lock can starve an exclusive one.** The first version used row locks on the
+workspace's row: `FOR SHARE` for task writes, `FOR UPDATE` for membership changes. The
+second review found the trap in that. Postgres row locks don't wait in line: a new
+`FOR SHARE` joins the transactions that already share the row at once, even while a
+`FOR UPDATE` is waiting for them to finish. So the exclusive lock only gets in at an
+instant when nobody holds the shared one, and with a steady stream of task edits, that
+instant never comes. The review measured it: while Carol edited one task from three loops
+at once, the owner couldn't remove her. The removal waited until the 10-second timeout and
+failed with a `500`. Requests from an outsider could hold up a rename the same way. This is
+called **starvation**: nothing is stuck for good, but one waiter never gets its turn.
+
+The fix is an **advisory lock**: a lock on a number that we choose, managed by Postgres
+like its other locks and released at `COMMIT` or `ROLLBACK`
+(`pg_advisory_xact_lock_shared()` and `pg_advisory_xact_lock()`). These locks wait in a
+**fair queue**: once an exclusive request is waiting, new shared requests wait behind it.
+The same test now removes Carol in about 20 ms, and still in about 70 ms with 24 loops of
+edits. The number comes from the workspace's id (a fixed first number that says "a
+workspace", then a hash of the id). Two workspaces whose ids hash to the same number would
+wait for each other now and then: slower, never wrong. The test "lets the owner remove a
+member who keeps editing a task: the locks are fair" fails with the row locks, in 3 runs
+out of 3.
+
+The same trap can't catch `lockProject()` and `lockTask()`: every transaction that locks
+those rows asks for the same strength, `FOR UPDATE`, and transactions waiting for the same
+exclusive row lock wait in line. It takes two strengths on one row, from different
+transactions, to starve one of them. (Exercise 10 looks at the one place where that still
+happens.)
+
 **Exclusive locks where a count matters.** Quotas are counted under an exclusive lock, as
-in chapter 4: the workspace row before counting projects, and the project row
+in chapter 4: the workspace's before counting projects, and the project row
 (`lockProject()`) before counting tasks. Two task creations in the same project wait for
 each other; in different projects, they don't.
 
@@ -1800,12 +1863,6 @@ that order, so two transactions can never each hold a lock the other is waiting 
 deadlock from chapter 4). Postgres also takes locks you didn't ask for: inserting a task
 checks its foreign keys with a light `FOR KEY SHARE` lock on the project row and on the
 users it references. Those come at the end, so they keep the order.
-
-A shared lock isn't free. Postgres records row locks in the row itself, which has room for
-one locker; when several transactions share a lock, it keeps their list in a separate
-structure, a **multixact**, and the row points to it. Every shared lock is also a write to
-the row's page. At thousands of writes per second _in one workspace_ that bookkeeping
-would start to show. This API is nowhere near that.
 
 ### Concept 12: The Power of Ten rules in this chapter
 
@@ -1851,7 +1908,32 @@ URL). It's valid JSON and valid Unicode, but Postgres text can't hold it, so a t
 search with one failed in the database: a `500`. The review found it in every text field,
 including the workspace and user names of earlier chapters. Input schemas now start from
 `Text` (`src/lib/text.ts`) instead of `z.string()`, and `input-bounds.test.ts` sends a NUL
-to every free-text field of every input schema (23 of them) and expects the `400`.
+to every free-text field of every input schema and expects the `400`.
+
+The second review found two more things about strings:
+
+- **Half a character.** JavaScript strings are UTF-16, where some characters, like most
+  emoji, take two code units: a **surrogate pair**. JSON can send one half on its own
+  (`"\uD800"`), which is no character at all. The database driver quietly turned it into
+  `�` (U+FFFD), so the API answered `201` with a different title than the one it was sent.
+  `Text` now refuses it too (`isWellFormed()`), and the input test sends it to every field.
+- **One exception, on purpose: the login password.** Before `Text`, sign-up took any
+  string, so an account may have a password with a NUL in it. A login that refused such a
+  password would lock that account out for good (there's no password reset yet), and the
+  NUL was never a problem there: a password is only hashed and compared, never stored. So
+  the login takes any string. The rule behind it: **checks on new data may get stricter,
+  but checks against old data must accept what was once allowed.** The test keeps the
+  exception in a list with its reason, so it can't spread quietly: 22 fields are checked,
+  and 1 is exempt.
+
+**One spelling per id.** Ids from clients are checked as uuids and lower-cased on the way
+in (`Id` in `src/lib/ids.ts`). Postgres compares uuids by value, so an id in capitals finds
+the same row. But our code also compares ids as text: "is the member being removed the
+caller?", "was this cursor made for this list?". The second review found both going wrong
+when a client writes uuids in capitals (some do, like Swift's `uuidString`): page 2 of a
+list failed with `INVALID_CURSOR`, and a member leaving the workspace got a `403`. Turning
+every input into one **canonical form** at the edge means no comparison inside has to
+think about it.
 
 ### What the review found
 
@@ -1868,11 +1950,36 @@ and security), and every finding was reproduced before it was fixed:
 
 The review also tried these, and found nothing: random and malformed input on every
 endpoint (no other `500`s), many requests racing in one workspace (no deadlock, no broken
-invariant), and a role change waiting behind heavy task traffic (about 40 ms).
+invariant), and a role change waiting behind heavy task traffic (about 40 ms). That last
+one was wrong, as the second review showed: it found the traffic that does block it.
 
 The last row is worth remembering. A test that fails "now and then" is a **flaky test**, and
 it's a bug report about the test: here, it assumed that rows created one after the other
 get different timestamps. They usually do, which is exactly why it took a while to show.
+
+After those fixes, a second, shorter review went over the code again, reproducing each
+finding, and checked this chapter against the code:
+
+| Found                                     | What could happen                                                                                    | Fix                                                        |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Shared row locks don't wait in line       | A member editing a task from three loops kept the owner from removing them: a `500` after 10 seconds | Advisory locks, which keep a fair queue (Concept 11)       |
+| Ids compared as text, as the client typed | With ids in capitals, page 2 of a list was `400 INVALID_CURSOR`, and leaving a workspace a `403`     | Ids are lower-cased on the way in (Concept 12)             |
+| The undated tasks read in id order        | Postgres walked the primary key through every project's tasks: 1,924 rows read and dropped for 21    | Read them in the index's order, `due_date, id` (Concept 5) |
+| Half of a surrogate pair accepted         | Stored as `�`: a `201`, and a title other than the one sent                                          | `Text` refuses it (Concept 12)                             |
+| The login password refused NUL            | An account whose password had a NUL could never log in again                                         | Any string at login (Concept 12)                           |
+
+It also corrected this chapter: the plans in Concept 4 had been simplified and are now the
+measured ones, `toPage()` doesn't query the database (the service does), and SECURITY.md
+said that an edited cursor gets a `400`, though one that is edited and still valid is
+accepted (Concept 6). While fixing all this, we checked one more lock and found nothing: a
+user's session refresh, while eight loops assigned tasks to them, waited about 20 ms
+(Exercise 10).
+
+The first row is the one to remember from this review. The first review had measured a
+role change behind heavy traffic, and it was fast; the second sent a different kind of
+traffic, requests that queue for one task while already holding the shared lock, so that
+their shared locks always overlap. **A test that passes only shows that this one way of
+trying found nothing.**
 
 ### How we know the tests work
 
@@ -1893,11 +2000,21 @@ meant to catch: we put the bug in on purpose, ran the test, and took the bug out
 | The cursor's list (`scope`) not checked                       | the tests with a cursor from another list   |
 | A project name or `q` accepting the NUL character             | the NUL tests (`500` instead of `400`)      |
 | No bound on projects × tasks                                  | the environment validation test             |
+| Row locks (`FOR SHARE`, `FOR UPDATE`) for the workspace again | the fair-lock test (`500`, 3 out of 3)      |
+| The exclusive workspace lock taken as a shared one            | the two-owners-leave race (3 out of 3)      |
+| Ids not lower-cased                                           | the tests with ids in capitals              |
+| `Text` accepting half of a surrogate pair                     | the input tests (`201` instead of `400`)    |
+| The login password refusing the NUL character                 | the login test with an old password         |
 
 This is called **mutation testing**: change the code in a small, wrong way (a "mutant")
 and check that some test fails. A mutant that survives points at a missing test. The query
 plans in Concepts 2, 4 and 5 were measured the same way, with `EXPLAIN ANALYZE` on 20
 projects of 5,000 tasks each, instead of assumed.
+
+One mutant survives on purpose: reading the undated tasks in id order (Concept 5) returns
+the same rows in the same order, so no test can catch it. Some things only a measurement
+shows. For those, the code says why it's written that way, and the measurement is written
+down next to it.
 
 ### Build it yourself
 
@@ -1917,6 +2034,10 @@ projects of 5,000 tasks each, instead of assumed.
 7. Add the filters, one test each. Search for `100%` before and after `escapeLike()`.
 8. Without `lockWorkspaceShared()`, run the race test that removes a member while assigning
    them tasks, and watch the invariant break. Then add the lock.
+9. Make the workspace locks row locks: `SELECT id FROM workspaces WHERE id = $1 FOR SHARE`
+   in `lockWorkspaceShared()`, and `FOR UPDATE` in `lockWorkspace()`. Run "lets the owner
+   remove a member who keeps editing a task", and watch the removal fail after 10 seconds.
+   Then put the advisory locks back.
 
 ### Exercises
 
@@ -1943,6 +2064,12 @@ projects of 5,000 tasks each, instead of assumed.
    rows.
 9. **Sort by priority.** Postgres orders an enum by its declaration: `LOW < MEDIUM < HIGH`.
    What would the cursor's `value` be, and which index would you need?
+10. **Two strengths on one row.** `lockUser()` takes `FOR UPDATE` on a user's row, and
+    assigning a task to that user takes `FOR KEY SHARE` on the same row (the foreign key
+    check). Could a stream of assignments hold up that user's token refresh, the way task
+    edits held up a removal? Write the test; we measured about 20 ms. Why is it so
+    different from Concept 11's case? Would `FOR NO KEY UPDATE` be enough for what
+    `lockUser()` protects?
 
 ### Words to know
 
@@ -1951,6 +2078,6 @@ keyset (cursor) pagination · tiebreaker · total order · index scan · `EXPLAI
 index condition vs filter · backward index scan · `NULLS FIRST` / `NULLS LAST` · opaque
 cursor · base64url · allow-list vs block-list · `LIKE` wildcards and escaping · calendar date
 vs timestamp · `PATCH` semantics (missing vs `null`) · ownership-based permission · shared
-lock (`FOR SHARE`) vs exclusive lock (`FOR UPDATE`) · multixact · lock order · isolation
-level (`READ COMMITTED`, `REPEATABLE READ`) · snapshot · NUL character · mutation testing ·
-flaky test
+vs exclusive lock · row lock (`FOR SHARE`, `FOR UPDATE`) · advisory lock · starvation and
+fair queue · lock order · isolation level (`READ COMMITTED`, `REPEATABLE READ`) · snapshot ·
+NUL character · UTF-16 surrogate pair · canonical form · mutation testing · flaky test
