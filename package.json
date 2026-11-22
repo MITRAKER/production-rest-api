@@ -67,6 +67,9 @@
   "overrides": {
     "eslint-plugin-sonarjs": {
       "minimatch": "^11.0.9"
+    },
+    "@prisma/config": {
+      "effect": "^3.22.1"
     }
   }
 }
