@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { alice, buildTestApp, registerUser, resetDb } from './helpers.js';
+import { alice, buildTestApp, registerUser, resetDb, sleep, warmUpPool } from './helpers.js';
 
 let app: FastifyInstance;
 
@@ -111,6 +111,17 @@ describe('GET /users/me', () => {
     expect(res.json().email).toBe(alice.email);
   });
 
+  it('rejects a valid token whose account no longer exists', async () => {
+    const { accessToken, user } = await registerUser(app);
+    await app.prisma.user.delete({ where: { id: user.id } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/users/me',
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
   it('rejects a missing token', async () => {
     const res = await app.inject({ method: 'GET', url: '/users/me' });
     expect(res.statusCode).toBe(401);
@@ -120,6 +131,7 @@ describe('GET /users/me', () => {
   it('rejects a tampered token', async () => {
     const { accessToken } = await registerUser(app);
     const [header, , signature] = accessToken.split('.');
+    if (header === undefined || signature === undefined) throw new Error('malformed JWT');
     const fakePayload = Buffer.from(JSON.stringify({ sub: 'someone-else' })).toString('base64url');
     const res = await app.inject({
       method: 'GET',
@@ -133,7 +145,7 @@ describe('GET /users/me', () => {
     const shortLived = await buildTestApp({ JWT_ACCESS_TTL: '1ms' });
     try {
       const { accessToken } = await registerUser(shortLived);
-      await new Promise((r) => setTimeout(r, 1100));
+      await sleep(1100);
       const res = await shortLived.inject({
         method: 'GET',
         url: '/users/me',
@@ -150,28 +162,66 @@ describe('POST /auth/refresh', () => {
   it('rotates: returns a new refresh token and the old one stops working', async () => {
     const { refreshToken } = await registerUser(app);
 
-    const first = await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } });
+    const first = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken },
+    });
     expect(first.statusCode).toBe(200);
     const rotated = first.json().refreshToken;
     expect(rotated).not.toBe(refreshToken);
 
-    const again = await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } });
+    const again = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken },
+    });
     expect(again.statusCode).toBe(401);
   });
 
   it('detects reuse of an old token and revokes the whole session', async () => {
     const { refreshToken: original } = await registerUser(app);
     const rotated = (
-      await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken: original } })
+      await app.inject({
+        method: 'POST',
+        url: '/auth/refresh',
+        payload: { refreshToken: original },
+      })
     ).json().refreshToken;
 
     // An attacker replays the stolen original token...
     await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken: original } });
 
     // ...so even the legitimate, newer token is now revoked.
-    const res = await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken: rotated } });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken: rotated },
+    });
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('INVALID_REFRESH_TOKEN');
+  });
+
+  it('lets only one of two simultaneous refreshes win, then ends the session', async () => {
+    const { refreshToken } = await registerUser(app);
+    await warmUpPool(app);
+    const results = await Promise.all([
+      app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } }),
+      app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } }),
+    ]);
+    expect(results.map((r) => r.statusCode).sort((a, b) => a - b)).toEqual([200, 401]);
+
+    // The loser looks exactly like a stolen-token replay, so the session is revoked:
+    // even the winner's new refresh token no longer works.
+    const winner = results.find((r) => r.statusCode === 200);
+    const next = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken: winner?.json().refreshToken },
+    });
+    expect(next.statusCode).toBe(401);
+    const live = await app.prisma.refreshToken.count({ where: { revokedAt: null } });
+    expect(live).toBe(0);
   });
 
   it('rejects an unknown token', async () => {
@@ -186,7 +236,11 @@ describe('POST /auth/refresh', () => {
   it('rejects an expired refresh token', async () => {
     const { refreshToken } = await registerUser(app);
     await app.prisma.refreshToken.updateMany({ data: { expiresAt: new Date(Date.now() - 1000) } });
-    const res = await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken },
+    });
     expect(res.statusCode).toBe(401);
   });
 });
@@ -194,10 +248,18 @@ describe('POST /auth/refresh', () => {
 describe('POST /auth/logout', () => {
   it('revokes the refresh token', async () => {
     const { refreshToken } = await registerUser(app);
-    const out = await app.inject({ method: 'POST', url: '/auth/logout', payload: { refreshToken } });
+    const out = await app.inject({
+      method: 'POST',
+      url: '/auth/logout',
+      payload: { refreshToken },
+    });
     expect(out.statusCode).toBe(204);
 
-    const res = await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken },
+    });
     expect(res.statusCode).toBe(401);
   });
 
@@ -208,6 +270,44 @@ describe('POST /auth/logout', () => {
       payload: { refreshToken: 'whatever' },
     });
     expect(res.statusCode).toBe(204);
+  });
+
+  it('ends the session even when given a token that was already rotated', async () => {
+    const { refreshToken: original } = await registerUser(app);
+    const rotated = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken: original },
+    });
+    await app.inject({ method: 'POST', url: '/auth/logout', payload: { refreshToken: original } });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      payload: { refreshToken: rotated.json().refreshToken },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('leaves no live token when a logout races a refresh', async () => {
+    // Without the user lock, a logout that starts while a refresh is rotating
+    // the token misses the new token, and the session survives the logout.
+    // The small delays make the two requests overlap in different ways.
+    const { refreshToken: first } = await registerUser(app);
+    await app.inject({ method: 'POST', url: '/auth/logout', payload: { refreshToken: first } });
+    for (const delayMs of [0, 1, 2, 3, 4, 5, 6, 7]) {
+      const login = await app.inject({ method: 'POST', url: '/auth/login', payload: alice });
+      const { refreshToken } = login.json<{ refreshToken: string }>();
+      await warmUpPool(app);
+      await Promise.all([
+        app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } }),
+        sleep(delayMs).then(() =>
+          app.inject({ method: 'POST', url: '/auth/logout', payload: { refreshToken } }),
+        ),
+      ]);
+      const live = await app.prisma.refreshToken.count({ where: { revokedAt: null } });
+      expect(live, `live tokens after a logout ${String(delayMs)} ms into a refresh`).toBe(0);
+    }
   });
 });
 

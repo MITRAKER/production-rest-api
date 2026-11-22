@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/MITRAKER/production-rest-api/security/advisories/new
+    about: Please report security problems privately, never in a public issue.
+  - name: Learning guide
+    url: https://github.com/MITRAKER/production-rest-api/blob/main/LEARNING.md
+    about: Wondering how or why something works? The learning guide may already explain it.

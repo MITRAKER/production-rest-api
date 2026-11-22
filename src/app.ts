@@ -2,12 +2,23 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 import type { Env } from './config/env.js';
+import { LIMITS } from './config/limits.js';
 import errorHandler from './plugins/error-handler.js';
 import prismaPlugin from './plugins/prisma.js';
 import authPlugin from './plugins/auth.js';
 import healthRoutes from './routes/health.js';
 import authRoutes from './modules/auth/auth.routes.js';
 import usersRoutes from './modules/users/users.routes.js';
+
+/** Pretty, colored logs for humans in development; JSON lines everywhere else. */
+export function loggerOptions(env: Pick<Env, 'NODE_ENV' | 'LOG_LEVEL'>) {
+  // Never write credentials or tokens into logs.
+  const redact = ['req.headers.authorization', 'req.headers.cookie'];
+  if (env.NODE_ENV === 'development') {
+    return { level: env.LOG_LEVEL, redact, transport: { target: 'pino-pretty' } };
+  }
+  return { level: env.LOG_LEVEL, redact };
+}
 
 /**
  * Builds the app without starting the HTTP server.
@@ -18,16 +29,12 @@ import usersRoutes from './modules/users/users.routes.js';
  */
 export async function buildApp(env: Env): Promise<FastifyInstance> {
   const app = Fastify({
-    logger:
-      env.NODE_ENV === 'development'
-        ? { level: env.LOG_LEVEL, transport: { target: 'pino-pretty' } }
-        : {
-            level: env.LOG_LEVEL,
-            // Never write credentials or tokens into logs.
-            redact: ['req.headers.authorization', 'req.headers.cookie'],
-          },
+    logger: loggerOptions(env),
     // Give every request an id so its log lines can be traced together.
     genReqId: () => crypto.randomUUID(),
+    // Power of Ten rule 3: explicit upper bounds on what a client can make us hold.
+    bodyLimit: LIMITS.bodyBytes,
+    requestTimeout: LIMITS.requestTimeoutMs,
   });
 
   // Let Zod schemas validate requests and serialize responses.
@@ -43,7 +50,10 @@ export async function buildApp(env: Env): Promise<FastifyInstance> {
   await app.register(errorHandler);
   // global: false -> only routes that opt in (via config.rateLimit) are limited.
   await app.register(rateLimit, { global: false });
-  await app.register(prismaPlugin, { databaseUrl: env.DATABASE_URL });
+  await app.register(prismaPlugin, {
+    databaseUrl: env.DATABASE_URL,
+    poolMax: env.DATABASE_POOL_MAX,
+  });
   await app.register(authPlugin, { secret: env.JWT_ACCESS_SECRET, accessTtl: env.JWT_ACCESS_TTL });
 
   await app.register(healthRoutes, { prefix: '/health' });

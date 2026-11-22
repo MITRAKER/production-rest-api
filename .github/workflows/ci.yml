@@ -1,15 +1,78 @@
+# Runs on every pull request and every push to main. All jobs must pass
+# before a pull request is merged. The release workflow also reuses this
+# file (workflow_call), so a release runs exactly the same checks.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+
+# Least privilege: the token can only read the repository.
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run still checking the old commit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Git hooks are for developers' machines, not for CI.
+  HUSKY: 0
 
 jobs:
-  test:
+  quality:
+    name: Format, lint and types
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Actions are pinned to a full commit SHA: a tag can be moved to
+      # malicious code, a commit can't. Dependabot keeps the pins up to date.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Formatting (Prettier)
+        run: npm run format:check
+      - name: Lint, zero warnings (ESLint with the Power of Ten rules)
+        run: npm run lint
+      - name: Types (strict TypeScript)
+        run: npm run typecheck
 
-    # A real Postgres for the tests, started fresh for every run.
+  commits:
+    name: Commit messages
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the full history, to read every commit of the pull request
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # The pull request title is checked by pr-title.yml, which also runs
+      # when the title is edited.
+      - name: Every commit follows Conventional Commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npx --no -- commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+
+  test:
+    name: Tests and coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # A real, throwaway Postgres for the tests (settings match .env.test).
     services:
       postgres:
         image: postgres:16-alpine
@@ -24,30 +87,123 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
-
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 22
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
           cache: npm
+      - run: npm ci
+      - name: Tests with coverage (fails below the thresholds in vitest.config.ts)
+        run: npm run test:coverage
+      - name: Coverage table in the job summary
+        if: ${{ !cancelled() }}
+        run: node scripts/coverage-summary.mjs >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 14
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Type-check
-        run: npm run typecheck
-
-      - name: Run tests
-        run: npm test
-
-      - name: Build
-        run: npm run build
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: No known high or critical vulnerabilities in production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Every installed package carries a valid npm registry signature
+        run: npm audit signatures
 
   docker:
+    name: Docker image (build, smoke test, scan)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: api
+          POSTGRES_PASSWORD: api
+          POSTGRES_DB: api_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U api -d api_smoke"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - name: Build Docker image
-        run: docker build -t production-rest-api .
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the API and migration images
+        id: build
+        run: |
+          docker build --target runtime --tag production-rest-api:ci .
+          docker build --target migrate --tag production-rest-api-migrate:ci .
+      - name: 'Smoke test: migrate, start, then call the API'
+        env:
+          DATABASE_URL: postgresql://api:api@localhost:5432/api_smoke
+        run: |
+          docker run --rm --network host -e DATABASE_URL production-rest-api-migrate:ci
+          JWT_ACCESS_SECRET="$(openssl rand -hex 32)"
+          export JWT_ACCESS_SECRET
+          docker run --detach --name api --network host \
+            -e DATABASE_URL -e JWT_ACCESS_SECRET production-rest-api:ci
+
+          # Bounded wait (Power of Ten rule 2): at most 30 tries, one second apart.
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://localhost:3000/health/ready; then
+              echo " <- ready after ${attempt} attempt(s)"
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "::error::The API did not become ready within 30 seconds"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          curl --silent --show-error --fail-with-body \
+            -X POST http://localhost:3000/auth/register \
+            -H 'content-type: application/json' \
+            -d '{"email":"smoke@example.com","password":"smoke-test-password","name":"Smoke Test"}'
+          echo
+      - name: Container logs
+        if: ${{ always() }}
+        run: docker logs api || true
+      # The scans run even if the smoke test failed, so one run reports every
+      # problem. Both images are published, so both are scanned.
+      - name: Scan the API image for known vulnerabilities (Trivy)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: production-rest-api:ci
+          version: v0.70.0
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+      - name: Scan the migration image for known vulnerabilities (Trivy)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: production-rest-api-migrate:ci
+          version: v0.70.0
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          skip-setup-trivy: true # installed by the step above

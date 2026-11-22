@@ -1,4 +1,4 @@
-import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
+import type { FastifyPluginCallbackZod } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 /**
@@ -13,18 +13,24 @@ import { z } from 'zod';
 const Live = z.object({ status: z.literal('ok') });
 const Ready = z.object({ status: z.enum(['ok', 'error']), database: z.enum(['up', 'down']) });
 
-const healthRoutes: FastifyPluginAsyncZod = async (app) => {
-  app.get('/live', { schema: { response: { 200: Live } } }, async () => ({ status: 'ok' as const }));
+const healthRoutes: FastifyPluginCallbackZod = (app, _opts, done) => {
+  app.get('/live', { schema: { response: { 200: Live } } }, () => ({ status: 'ok' as const }));
 
-  app.get('/ready', { schema: { response: { 200: Ready, 503: Ready } } }, async (request, reply) => {
-    try {
-      await app.prisma.$queryRaw`SELECT 1`;
-      return { status: 'ok' as const, database: 'up' as const };
-    } catch (err) {
-      request.log.error({ err }, 'readiness check failed: database unreachable');
-      return reply.code(503).send({ status: 'error', database: 'down' });
-    }
-  });
+  app.get(
+    '/ready',
+    { schema: { response: { 200: Ready, 503: Ready } } },
+    async (request, reply) => {
+      try {
+        await app.prisma.$queryRaw`SELECT 1`;
+        return { status: 'ok' as const, database: 'up' as const };
+      } catch (err) {
+        request.log.error({ err }, 'readiness check failed: database unreachable');
+        return reply.code(503).send({ status: 'error', database: 'down' });
+      }
+    },
+  );
+
+  done();
 };
 
 export default healthRoutes;
