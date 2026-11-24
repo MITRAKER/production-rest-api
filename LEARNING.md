@@ -839,6 +839,12 @@ habits protect it:
 CodeQL also scans the workflow files (the `actions` language), and OpenSSF Scorecard checks
 all of this every week.
 
+An update can break a workflow, too. When Dependabot moved Scorecard to v2.6.0, the pull
+request passed every check, because Scorecard doesn't run on pull requests. It failed on
+`main` right after the merge: the Docker image that v2.6.0 runs can't be downloaded (GitHub's
+registry answers `404`). The pin made the way back one line, back to v2.5.0's SHA, and
+`dependabot.yml` now skips v2.6.0. A workflow that only runs on `main` is only tested there.
+
 ### Concept 8: Your dependencies are your code
 
 `package-lock.json` lists about 500 packages. Any of them can have a vulnerability, or be
