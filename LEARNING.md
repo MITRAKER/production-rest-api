@@ -769,7 +769,10 @@ The history becomes readable at a glance, and tools can generate changelogs and 
 version number from it (`feat` means a new minor version, `fix` a patch, `!` a major). CI
 checks every commit of a pull request, and a small workflow of its own, `pr-title.yml`, checks
 the title. It runs again whenever the title is edited: re-running an old check wouldn't help,
-because a run always uses the title it started with.
+because a run always uses the title it started with. Dependabot is the one exception: it titles
+grouped updates "Bump the … group", with a capital even after the lowercase prefix that
+`dependabot.yml` sets, so its titles and commits aren't checked (that prefix still gives them
+the right type and scope).
 
 ### Concept 6: How a GitHub Actions workflow works
 

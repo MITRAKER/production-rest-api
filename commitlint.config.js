@@ -9,9 +9,11 @@
  */
 const config = {
   extends: ['@commitlint/config-conventional'],
-  // Dependabot's titles follow the convention (see .github/dependabot.yml),
-  // but its commit bodies contain long release-note lines that would break
-  // the line-length rules. Its commits are recognizable by their sign-off.
+  // Dependabot's commits are skipped: their bodies contain long release-note
+  // lines that would break the line-length rules, and its grouped updates
+  // start with a capital ("Bump the … group"). Its commits are recognizable by
+  // their sign-off. pr-title.yml skips its pull request titles for the same
+  // reason; .github/dependabot.yml gives them the right type and scope.
   ignores: [(message) => message.includes('Signed-off-by: dependabot[bot]')],
 };
 
