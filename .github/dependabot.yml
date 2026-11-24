@@ -41,6 +41,12 @@ updates:
     groups:
       github-actions:
         patterns: ['*']
+    ignore:
+      # Its Docker image can't be pulled (GHCR answers 404 for its linux/amd64
+      # manifest), and Scorecard doesn't run on pull requests, so the update
+      # passed every check and failed only on main. Take the next release.
+      - dependency-name: ossf/scorecard-action
+        versions: ['2.6.0']
 
   - package-ecosystem: docker
     directory: /
