@@ -16,7 +16,8 @@ import * as workspaceSchemas from '../src/modules/workspaces/workspaces.schemas.
  *   maxLength (or a fixed format) and every array a maxItems.
  * - No free-text string may contain the NUL character, which Postgres text
  *   can't hold, or half of a UTF-16 surrogate pair, which the database driver
- *   would quietly change (see src/lib/text.ts).
+ *   would quietly change (see src/lib/text.ts). The only exceptions are the
+ *   fields in ANY_STRING, each for a reason.
  *
  * When you add a schema module, add it to `modules` below.
  */
@@ -127,7 +128,7 @@ function messagesFor(entry: (typeof textFields)[number], value: string): string[
   return issues.filter((issue) => issue.path[0] === entry.field).map((issue) => issue.message);
 }
 
-describe('no client string may contain NUL (U+0000) or an unpaired surrogate', () => {
+describe('no free-text input outside ANY_STRING may contain NUL (U+0000) or an unpaired surrogate', () => {
   it('finds the free-text fields', () => {
     const names = textFields.map((f) => f.name);
     expect(names).toContain('auth.RegisterBody.password');

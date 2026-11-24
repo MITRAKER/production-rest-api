@@ -76,6 +76,17 @@ describe('GET /workspaces/:workspaceId', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('VALIDATION_ERROR');
   });
+
+  it('gives every spelling of an id the same answer, the max uuid included', async () => {
+    // z.uuid() lets the max uuid through only in lower case: in capitals it
+    // was a 400, in lower case a 404. Id checks only the shape (src/lib/ids.ts).
+    const alice = await signUp(app, 'Alice');
+    const max = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+    const lower = await alice.api.get(`/workspaces/${max}`);
+    const upper = await alice.api.get(`/workspaces/${max.toUpperCase()}`);
+    expect([lower.statusCode, upper.statusCode]).toEqual([404, 404]);
+    expect(upper.json()).toEqual(lower.json());
+  });
 });
 
 describe('PATCH /workspaces/:workspaceId', () => {
@@ -230,7 +241,7 @@ describe('PATCH /workspaces/:workspaceId/members/:userId (change role)', () => {
     const team = await createTeam(app);
     await team.owner.api.patch(`${team.url}/members/${team.admin.id}`, { role: 'OWNER' });
 
-    // Without the row lock, both requests could see "2 owners" and both succeed,
+    // Without the workspace lock, both requests could see "2 owners" and both succeed,
     // leaving the workspace with no owner at all. warmUpPool() makes sure the
     // two requests really run at the same time (see test/helpers.ts).
     await warmUpPool(app);

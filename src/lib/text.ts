@@ -22,7 +22,8 @@ export const UNICODE_MESSAGE = 'Must be valid Unicode (no unpaired surrogate)';
  *   and answer with, a different string than the one we were sent.
  *
  * Both become a 400, like any other invalid field. test/input-bounds.test.ts
- * checks that every free-text input refuses them.
+ * checks that every free-text input refuses them, except the few it lists in
+ * ANY_STRING, each with its reason (the login password).
  */
 export const Text = z
   .string()

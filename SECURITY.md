@@ -51,9 +51,9 @@ exactly what we want to hear about.
 - **Rate limiting** on the authentication endpoints slows down brute-force attacks.
 - **Workspaces** check membership before anything else, so outsiders get `404` and can't
   even learn that a workspace exists. Roles are checked in one policy file, and you can only
-  act on people with a lower role than yours. Every change to a workspace runs under a lock
-  on that workspace, so simultaneous requests can't leave it without an owner or over a
-  quota.
+  act on people with a lower role than yours. Every change that could leave a workspace
+  without an owner or over a quota runs under a lock on that workspace, so simultaneous
+  requests can't do either.
 - **Projects and tasks** are looked up by every id in their URL (workspace, project and
   task), so an id from another workspace is simply not found (`404`). Their changes hold a
   shared lock on the workspace, so a role or membership can't change halfway through one.
