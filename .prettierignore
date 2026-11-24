@@ -4,3 +4,5 @@ node_modules/
 src/generated/
 prisma/migrations/
 package-lock.json
+# Written by `npm run openapi` (JSON.stringify), checked by test/openapi.test.ts.
+openapi.json

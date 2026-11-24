@@ -1,9 +1,9 @@
 import type { FastifyInstance } from 'fastify';
-import { buildApp } from '../src/app.js';
+import { buildApp, type BuildOptions } from '../src/app.js';
 import { loadEnv } from '../src/config/env.js';
 
-export async function buildTestApp(overrides: Record<string, string> = {}) {
-  return buildApp(loadEnv({ ...process.env, ...overrides }));
+export async function buildTestApp(overrides: Record<string, string> = {}, options?: BuildOptions) {
+  return buildApp(loadEnv({ ...process.env, ...overrides }), options);
 }
 
 /**

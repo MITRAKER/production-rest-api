@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import argon2 from 'argon2';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import { Prisma } from '../../generated/prisma/client.js';
 import type { Db } from '../../lib/db.js';
 import { Errors } from '../../lib/errors.js';
@@ -70,27 +70,39 @@ export class AuthService {
    * every refresh returns a NEW refresh token and revokes the old one.
    * If a revoked token is ever presented again, someone has a stolen copy,
    * so we revoke the whole family and force a fresh login.
+   *
+   * `log` is the request's logger, so a warning carries the request's id.
    */
-  async refresh(refreshToken: string) {
+  async refresh(refreshToken: string, log: FastifyBaseLogger) {
     const stored = await this.prisma.refreshToken.findUnique({
       where: { tokenHash: hashToken(refreshToken) },
     });
     if (stored === null) throw Errors.invalidRefreshToken();
 
-    if (stored.revokedAt !== null) {
-      await this.revokeFamily(stored);
-      this.app.log.warn({ userId: stored.userId }, 'refresh token reuse detected; family revoked');
-      throw Errors.invalidRefreshToken();
-    }
+    if (stored.revokedAt !== null) return this.endStolenSession(stored, log);
     if (stored.expiresAt <= new Date()) throw Errors.invalidRefreshToken();
 
     const rotated = await this.rotate(stored);
-    if (rotated === null) {
-      // Someone used this token a split second before us: treat it as reuse.
-      await this.revokeFamily(stored);
-      throw Errors.invalidRefreshToken();
-    }
+    // Someone used this token a split second before us: that's reuse too.
+    if (rotated === null) return this.endStolenSession(stored, log);
     return rotated;
+  }
+
+  /**
+   * A refresh token was used twice, so a copy may be in the wrong hands: end
+   * the whole session. The warning names the user and the session (never the
+   * token), so someone can look into it.
+   */
+  private async endStolenSession(
+    stored: { userId: string; familyId: string },
+    log: FastifyBaseLogger,
+  ): Promise<never> {
+    await this.revokeFamily(stored);
+    log.warn(
+      { userId: stored.userId, familyId: stored.familyId },
+      'refresh token reused: session revoked',
+    );
+    throw Errors.invalidRefreshToken();
   }
 
   /**

@@ -19,16 +19,18 @@ export const UpdateProjectBody = z
 
 export const ProjectListQuery = PageQuery;
 
-export const Project = z.object({
-  id: z.uuid(),
-  workspaceId: z.uuid(),
-  name: z.string(),
-  description: z.string(),
-  createdById: z.uuid().nullable(),
-  createdAt: z.date(),
-  updatedAt: z.date(),
-});
+export const Project = z
+  .object({
+    id: z.uuid(),
+    workspaceId: z.uuid(),
+    name: z.string(),
+    description: z.string(),
+    createdById: z.uuid().nullable().describe('Who created it; null if that account is gone'),
+    createdAt: z.date(),
+    updatedAt: z.date(),
+  })
+  .meta({ id: 'Project' });
 
-export const ProjectPage = pageOf(Project);
+export const ProjectPage = pageOf(Project).meta({ id: 'ProjectPage' });
 
 export type UpdateProjectBody = z.infer<typeof UpdateProjectBody>;
