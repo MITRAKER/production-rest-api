@@ -111,6 +111,10 @@ Both follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0
 - Mark a breaking change with `!` after the type or scope (`feat(api)!: rename the error field`)
   and explain it in a `BREAKING CHANGE:` footer.
 - commitlint also accepts `style` and `revert`.
+- Dependabot's commits and pull request titles aren't checked: its grouped updates start with
+  `Bump`, with a capital, even after the prefix we set, and its commits carry long release
+  notes. `.github/dependabot.yml` gives them the right type and scope (`build(deps)`,
+  `ci(deps)`).
 
 ## Git hooks
 
@@ -145,7 +149,7 @@ and all of them must pass before merging:
 | Types              | `npm run typecheck`                 | The TypeScript compiler finds no errors in `src`, `test` and `scripts`                                                |
 | Tests and coverage | `npm run test:coverage`             | All tests pass against PostgreSQL 16 and coverage meets the thresholds                                                |
 | Commit messages    | commitlint                          | Every commit follows Conventional Commits                                                                             |
-| Pull request title | commitlint                          | The title follows Conventional Commits (checked again whenever you edit it)                                           |
+| Pull request title | commitlint                          | The title follows Conventional Commits (checked again whenever you edit it; not for Dependabot)                       |
 | Dependency audit   | `npm audit`, `npm audit signatures` | No high or critical vulnerability in production dependencies; all signatures valid                                    |
 | Docker images      | `docker build`, smoke test, Trivy   | Both build; one migrates a real database, the other starts and serves requests; no fixable high or critical CVE       |
 | Code scanning      | CodeQL                              | No new security alerts in the code or the workflows                                                                   |

@@ -22,6 +22,12 @@ env:
 jobs:
   title:
     name: Pull request title
+    # Not for Dependabot: it titles grouped updates "Bump the … group" with a
+    # capital B, even after the lowercase prefix that dependabot.yml sets, and
+    # commitlint wants the summary in lowercase. dependabot.yml already gives
+    # the type and scope, and commitlint.config.js skips its commits too. A
+    # skipped job counts as passed.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
