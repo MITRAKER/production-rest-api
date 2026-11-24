@@ -17,7 +17,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Workspaces with role-based permissions (owner, admin, member): create, list, rename and
   delete workspaces; list members, change roles, remove members or leave; invite by email
   with single-use, expiring tokens. Outsiders get `404`, you can only act on people with a
-  lower role than yours, row locks keep at least one owner in every workspace, and quotas
+  lower role than yours, a lock on each workspace keeps at least one owner in it, and quotas
   limit workspaces per user, members per workspace and pending invitations
   (`409 LIMIT_REACHED`).
 - Projects and tasks inside workspaces. Admins manage projects; every member reads, creates
@@ -56,8 +56,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a `400` instead of failing in the database with a `500`. Half of a UTF-16 surrogate pair
   gets a `400` too, instead of being stored as `�`. The login password is the exception: it
   is never stored, and accounts created before this rule must still be able to log in.
-- Ids from clients are lower-cased, so ids written in capitals work everywhere, including
-  the next page of a list and leaving a workspace.
+- Ids from clients are checked only for their shape and lower-cased, so ids written in
+  capitals work everywhere, including the next page of a list and leaving a workspace.
 - Both Docker images are pinned by digest, run on Node.js 26 LTS as a non-root user and get
   the latest Alpine security fixes. Neither ships npm, and the API image leaves out the
   Prisma CLI.
