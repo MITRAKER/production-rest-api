@@ -16,10 +16,13 @@ expires, trade the refresh token for new ones at \`POST /auth/refresh\`.
 **Errors.** Every error has the same shape:
 \`{ "error": { "code": "EMAIL_TAKEN", "message": "..." } }\`. Programs switch on
 \`code\` (the \`Error\` schema lists them all); \`message\` is for people and its
-wording may change.
+wording may change. The only exceptions come from the HTTP server itself, for
+requests that never reach the API: one it can't read (400), headers over
+16 KB (431), a request that takes over 30 seconds to arrive (408), or one that
+arrives during a shutdown (503). Those answers have no \`code\`.
 
-**Request ids.** Every answer has an \`x-request-id\` header. Quote it when you
-report a problem: it finds that request's log lines.
+**Request ids.** Every answer from the API has an \`x-request-id\` header.
+Quote it when you report a problem: it finds that request's log lines.
 `.trim();
 
 /** The groups the documentation shows, in this order. */
@@ -70,7 +73,8 @@ function exampleBesideSchema(answer: unknown): unknown {
   if (typeof answer !== 'object' || answer === null || !('$ref' in answer)) return answer;
   if (!('examples' in answer) || !Array.isArray(answer.examples)) return answer;
   const description = 'description' in answer ? answer.description : undefined;
-  const media = { schema: { $ref: answer.$ref }, example: answer.examples[0] as unknown };
+  const examples: unknown[] = answer.examples;
+  const media = { schema: { $ref: answer.$ref }, example: examples[0] };
   return { description, content: { 'application/json': media } };
 }
 

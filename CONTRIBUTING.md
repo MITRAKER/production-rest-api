@@ -297,7 +297,7 @@ MAJOR version (see [Releasing](#releasing)).
 
 `test/openapi.test.ts` checks that the document is valid OpenAPI 3.1, that every route has
 an `operationId`, a summary, a group and a description for each answer, and that every route
-that needs a token answers `401` without one, before reading the body.
+that needs a token answers `401` without one, before it reads or validates anything.
 
 ## Changing the database schema
 

@@ -20,10 +20,11 @@ function errorAnswer(description: string, example: z.infer<typeof ErrorResponse>
  * and every route also gets `default`, for the errors any route can give
  * (a body that's too large, a server error...).
  *
- * These schemas aren't only documentation. Fastify checks every answer
- * against the schema for its status before sending it, so an error body that
- * doesn't have the documented shape, or a code that isn't in ERROR_CODES,
- * fails loudly in the tests instead of surprising a client.
+ * These schemas aren't only documentation. Every answer is checked against
+ * the schema for its status before it's sent (error answers first by the
+ * error handler, against the Error schema). An error body that doesn't have
+ * the documented shape, or a code that isn't in ERROR_CODES, becomes a 500
+ * that fails loudly in the tests instead of surprising a client.
  */
 const ERROR_ANSWERS = {
   400: errorAnswer('The request is invalid. VALIDATION_ERROR lists each problem in error.details', {
@@ -69,5 +70,7 @@ export function errorResponses<S extends ErrorStatus>(
   ...statuses: S[]
 ): Pick<typeof ERROR_ANSWERS, S> & { default: typeof ANY_ROUTE } {
   const picked = Object.fromEntries(statuses.map((status) => [status, ERROR_ANSWERS[status]]));
+  // Object.fromEntries() forgets which keys it got. They are exactly
+  // `statuses`, each with its own answer: the very definition of Pick.
   return { ...(picked as Pick<typeof ERROR_ANSWERS, S>), default: ANY_ROUTE };
 }

@@ -98,12 +98,13 @@ describe('the OpenAPI document', () => {
 });
 
 describe('every route the document says needs a token', () => {
-  it('answers 401 without one, before it even reads the body', async () => {
-    const id = crypto.randomUUID();
+  it('answers 401 without one, before it reads or validates anything', async () => {
     const isPublic = (operation: Operation) => operation.security?.length === 0;
     for (const { path, method, operation } of operations()) {
-      const target = { method: method.toUpperCase(), url: path.replaceAll(/\{\w+\}/g, id) };
-      // Broken JSON: a route that read the body before the token would answer 400.
+      // Everything invalid: ids that aren't ids, a page size of 0, broken JSON.
+      // A route that read or validated any of it before the token would answer 400.
+      const url = `${path.replaceAll(/\{\w+\}/g, 'not-an-id')}?limit=0`;
+      const target = { method: method.toUpperCase(), url };
       const broken = { headers: { 'content-type': 'application/json' }, payload: '{"broken' };
       const res = await app.inject(method === 'get' ? target : { ...target, ...broken });
       const code = res.json<{ error?: { code: string } }>().error?.code;

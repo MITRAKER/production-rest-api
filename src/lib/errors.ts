@@ -5,9 +5,9 @@ import { z } from 'zod';
  * switch on it, so once released it never changes. The message is for
  * people and may change wording.
  *
- * The OpenAPI document lists these codes (the Error schema), and every
- * documented error response is checked against that schema before it's
- * sent, so the API can't answer with a code that isn't in this list.
+ * The OpenAPI document lists these codes (the Error schema), and the error
+ * handler checks every error answer against that schema before it's sent:
+ * one with a code that isn't in this list becomes a generic 500.
  */
 export const ERROR_CODES = [
   // 400: the request itself is wrong

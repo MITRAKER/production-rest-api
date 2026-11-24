@@ -2138,18 +2138,20 @@ GET /docs/yaml   the same, in YAML
 The same document is committed as `openapi.json`, so a change to the API shows up in code
 review.
 
-Errors became stricter. Every error answer now uses a code from one list, and Fastify
-checks each error body against that list before sending it:
+Errors became stricter. Every error answer now uses a code from one list, and the error
+handler checks each error body against that list before sending it:
 
-| Situation                               | Before                                | Now                          |
-| --------------------------------------- | ------------------------------------- | ---------------------------- |
-| A body that isn't JSON                  | `400 FST_ERR_CTP_INVALID_JSON_BODY`   | `400 INVALID_JSON`           |
-| An empty body sent as JSON              | `400 FST_ERR_CTP_EMPTY_JSON_BODY`     | `400 INVALID_JSON`           |
-| A body over 64 KB                       | `413 FST_ERR_CTP_BODY_TOO_LARGE`      | `413 PAYLOAD_TOO_LARGE`      |
-| A content type other than JSON          | `415 FST_ERR_CTP_INVALID_MEDIA_TYPE`  | `415 UNSUPPORTED_MEDIA_TYPE` |
-| A URL that isn't valid percent-encoding | `400` in Fastify's own format         | `400 BAD_REQUEST`            |
-| `GET /nope?token=…`                     | `404`, the message repeating `?token` | `404`, the path only         |
-| No token, and a broken body             | `400` (the body was read first)       | `401 UNAUTHORIZED`           |
+| Situation                                 | Before                                    | Now                          |
+| ----------------------------------------- | ----------------------------------------- | ---------------------------- |
+| Malformed JSON                            | `400 FST_ERR_CTP_INVALID_JSON_BODY`       | `400 INVALID_JSON`           |
+| An empty body sent as JSON                | `400 FST_ERR_CTP_EMPTY_JSON_BODY`         | `400 INVALID_JSON`           |
+| A body over 64 KB                         | `413 FST_ERR_CTP_BODY_TOO_LARGE`          | `413 PAYLOAD_TOO_LARGE`      |
+| A form or XML body                        | `415 FST_ERR_CTP_INVALID_MEDIA_TYPE`      | `415 UNSUPPORTED_MEDIA_TYPE` |
+| A `text/plain` body                       | `400 VALIDATION_ERROR` (read as a string) | `415 UNSUPPORTED_MEDIA_TYPE` |
+| A URL that isn't valid percent-encoding   | `400` in Fastify's format, with the URL   | `400 BAD_REQUEST`, the path  |
+| `GET /nope?token=…`                       | `404`, the message repeating `?token`     | `404`, the path only         |
+| No token, and a broken request            | `400` (read and validated first)          | `401 UNAUTHORIZED`           |
+| A bug: an `AppError` with an unknown code | sent as it is                             | `500 INTERNAL_ERROR`, logged |
 
 And the logs say more, and never too much:
 
@@ -2191,24 +2193,41 @@ could rename them, and our clients would break without us changing a line. Now t
 handler translates them:
 
 ```ts
+const CODE_FOR_STATUS = new Map<number, ErrorCode>([
+  [401, 'UNAUTHORIZED'],
+  [403, 'FORBIDDEN'],
+  [404, 'NOT_FOUND'],
+  [413, 'PAYLOAD_TOO_LARGE'],
+  [415, 'UNSUPPORTED_MEDIA_TYPE'],
+  [429, 'RATE_LIMITED'],
+]);
+
 function clientErrorCode(err: unknown, status: number): ErrorCode {
-  if (status === 413) return 'PAYLOAD_TOO_LARGE';
-  if (status === 415) return 'UNSUPPORTED_MEDIA_TYPE';
-  if (status === 429) return 'RATE_LIMITED';
   const code = frameworkCodeOf(err);
-  return code !== undefined && INVALID_JSON_CODES.has(code) ? 'INVALID_JSON' : 'BAD_REQUEST';
+  if (code !== undefined && INVALID_JSON_CODES.has(code)) return 'INVALID_JSON';
+  return CODE_FOR_STATUS.get(status) ?? 'BAD_REQUEST';
 }
 ```
 
-It goes by the HTTP status where it can, because HTTP doesn't change. It reads Fastify's
-code only to tell the two JSON errors apart from the other `400`s. Anything it doesn't know
-becomes `BAD_REQUEST`: an upgrade can make our answers vaguer, never break them.
+It goes by the HTTP status, because HTTP doesn't change. It reads Fastify's code only to
+tell the two JSON errors apart from the other `400`s. Anything it doesn't know becomes
+`BAD_REQUEST`: an upgrade can make our answers vaguer, never break them. The same goes for
+plugins: when `@fastify/static` refuses a path under `/docs/static` with `403`, the client
+gets `FORBIDDEN`.
 
 **Errors before routing.** A few errors happen before Fastify has even found the route: a
-URL that isn't valid percent-encoding (`/workspaces/%E0%A4%A`), or an id in the path
-longer than 100 characters (`414`, Fastify's `maxParamLength`). They skip the error handler and every hook, so Fastify used
-to answer them in its own format, without even an `x-request-id`. Its `frameworkErrors`
-option hands them to us instead (`answerFrameworkError()` in the error handler).
+URL that isn't valid percent-encoding (`/workspaces/%E0%A4%A`), or an id in the path longer
+than 100 characters (`414`; Fastify's `maxParamLength`, which `LIMITS.pathParamChars` now
+sets explicitly). They skip the error handler and every hook, so Fastify used to answer them
+in its own format, without even an `x-request-id`. Its `frameworkErrors` option hands them
+to us instead (`answerFrameworkError()` in the error handler), and we write their messages
+ourselves: Fastify's repeated the whole URL, query string included.
+
+**The API reads JSON only.** Fastify reads two body types out of the box: JSON and
+`text/plain`. A `text/plain` body (what `fetch()` sends for a string body if you forget the
+`Content-Type`) reached the routes as a string, and failed validation with a puzzling
+"expected object, received string". `app.removeContentTypeParser('text/plain')` turns it
+into a `415`, which says what's wrong.
 
 **The standard alternative: Problem Details.** RFC 9457 defines a standard format for
 errors, `application/problem+json`:
@@ -2274,11 +2293,28 @@ Each status comes with a description and a typical example, so the docs show `NO
 under `404` and `FORBIDDEN` under `403`. The examples are typed: one with a code that isn't
 in the list doesn't compile.
 
-These aren't only docs. Fastify serializes every answer with the schema for its status, so
-every error body is checked against the `Error` schema on its way out. An error with a code
-that isn't in the list, or without a message, becomes a `500` (logged as "response does not
-match its schema") instead of reaching a client in the wrong shape. Every test in the suite
-ran through these checks.
+These aren't only docs: every answer is checked before it's sent. Fastify serializes a
+handler's answer with the schema for its status, and one that doesn't fit becomes a `500`,
+logged as "response does not match its schema". Error answers are checked by the error
+handler itself, before Fastify sees them:
+
+```ts
+function sendError(reply: FastifyReply, status: number, body: ErrorBody, cause?: unknown) {
+  const checked = ErrorResponse.safeParse(body);
+  if (checked.success) return reply.code(status).send(checked.data);
+  const issues = checked.error.issues;
+  reply.log.error({ err: cause, status, issues }, 'response does not match its schema');
+  return reply.code(500).send(INTERNAL_ERROR);
+}
+```
+
+Why not leave error answers to Fastify's check too? Because Fastify runs our error handler
+only once per request. If the answer our handler produces fails Fastify's check, that second
+error goes to Fastify's own error handler, which answers in Fastify's shape:
+`500 FST_ERR_FAILED_ERROR_SERIALIZATION`, exactly what the catalog exists to prevent. So an
+`AppError` with a code that isn't in the list, the not-found answer and the errors from
+before routing all go through `sendError()`, and one that doesn't fit becomes our generic
+`500`. The review found this one (see "What the review found").
 
 ### Concept 4: A committed copy of the document
 
@@ -2324,9 +2360,12 @@ app.addHook('onRequest', app.authenticate);
 ```
 
 Without a valid token, the answer is `401` before the body is even read. A test checks it
-for every protected route in the document: it sends broken JSON without a token, and
-expects `401`. Only a route that checks the token first can pass. The routes come from the
-document itself, so a new route is covered without anyone remembering to add it.
+for every protected route in the document. Without a token, it sends ids that aren't ids,
+`?limit=0` and broken JSON, and expects `401`: a route that read or validated any of that
+before checking the token would answer `400`. Two routes have nothing to read or validate,
+`GET /users/me` and `GET /workspaces`, so for them the order makes no difference, and the
+test can't tell. The routes come from the document itself, so a new route is covered
+without anyone remembering to add it.
 
 ### Concept 6: Logs that say who, and which request, but never a secret
 
@@ -2391,6 +2430,10 @@ app = await buildTestApp(
 
 If someone later logs request bodies "just to debug something", this test fails.
 
+The URL is the one part of a request that is always logged (on the "incoming request" line,
+query string included), as in any web server's access log. So the API never takes a secret
+in a URL: passwords and tokens only travel in headers and bodies.
+
 ### Concept 7: When a library gets it almost right
 
 Three things didn't come out right on their own. Each fix is a few lines, with a comment
@@ -2421,49 +2464,89 @@ checking that they exist. The fixes came from reading the libraries' code in
   at most one round per schema, and it stops as soon as a round finds nothing new. The test
   helper that waits for a lock gives up after 100 tries.
 - **Rule 3 (everything has a bound):** a request id from upstream is at most 128
-  characters, an id in the path at most 100 (`414` above), and a body at most 64 KB (`413`).
+  characters, an id in the path at most 100 (`LIMITS.pathParamChars`, `414` above), and a
+  body at most 64 KB (`413`).
 - **Rule 5 (assertions):** every answer is checked against its schema before it's sent. An
   answer that doesn't fit becomes a `500` and a log line, never a malformed body.
-- **Rule 8 (no escape hatches):** this chapter needed one type assertion, `as S` in
-  `usedSchemasOnly()`, because `Object.fromEntries()` forgets the type of the values. Its
-  comment says why it's safe: the values are the same objects, minus the unused ones.
+- **Rule 8 (no escape hatches):** this chapter needed two type assertions, both because
+  `Object.fromEntries()` forgets which keys and values it got: `as S` in `usedSchemasOnly()`
+  and `as Pick<…>` in `errorResponses()`. Each has a comment saying why it's safe.
 
 ### How we know the tests work
 
 As in chapter 5, each new test was run against the bug it's meant to catch:
 
-| Bug put in on purpose                                 | Caught by                                       |
-| ----------------------------------------------------- | ----------------------------------------------- |
-| `authenticate` back in `preHandler` (one routes file) | the "401 without a token, before the body" test |
-| `security: []` missing on the login route             | the same test, and the `openapi.json` test      |
-| Fastify's JSON errors not translated                  | the `INVALID_JSON` test                         |
-| No `frameworkErrors`                                  | the "errors from before routing" test           |
-| The not-found message repeating the query string      | the unknown route test                          |
-| An `AppError` with a code that isn't in the list      | 13 workspace tests (`500` instead of `404`)     |
-| An example with a code that isn't in the list         | the examples test                               |
-| Examples left next to the `$ref`                      | the examples test, and the `openapi.json` test  |
-| The `…Input` copies kept                              | the `openapi.json` test                         |
-| No `ignoreTrailingSlash`                              | the `openapi.json` test                         |
-| No `setBindings`                                      | the "which user" test                           |
-| Any `x-request-id` accepted                           | the `requestIdFor()` tests                      |
-| Request bodies logged                                 | the "no password or token" test                 |
-| No warning when two requests use one refresh token    | the "same moment" test                          |
+| Bug put in on purpose                                            | Caught by                                      |
+| ---------------------------------------------------------------- | ---------------------------------------------- |
+| `authenticate` back in `preHandler`, in any routes file but one¹ | the "401 before reading or validating" test    |
+| The same, for the `GET` routes of `tasks.routes.ts` only         | the same test (the invalid ids and `?limit=0`) |
+| `security: []` missing on the login route                        | the same test, and the `openapi.json` test     |
+| Fastify's JSON errors not translated                             | the `INVALID_JSON` test                        |
+| Codes for plugin errors not by status (`403` → `BAD_REQUEST`)    | the plugin error test                          |
+| The `text/plain` parser kept                                     | the "JSON only" test                           |
+| No `frameworkErrors`                                             | the "errors from before routing" test          |
+| Fastify's message kept for a bad URL (query string included)     | the same test                                  |
+| The not-found message repeating the query string                 | the unknown route test                         |
+| Error answers not checked by `sendError()`                       | the unknown code test (Fastify's shape)        |
+| An `AppError` with a code that isn't in the list                 | the unknown code test, and 13 workspace tests  |
+| An example with a code that isn't in the list                    | the examples test                              |
+| Examples left next to the `$ref`                                 | the examples test, and the `openapi.json` test |
+| The `…Input` copies kept                                         | the `openapi.json` test                        |
+| No `ignoreTrailingSlash`                                         | the `openapi.json` test                        |
+| No `setBindings`                                                 | the "which user" test                          |
+| Any `x-request-id` accepted                                      | the `requestIdFor()` tests                     |
+| Request bodies logged                                            | the "no password or token" test                |
+| No warning when two requests use one refresh token               | the "same moment" test                         |
+
+¹ `users.routes.ts`: its one route, `GET /users/me`, has nothing to read or validate, so the
+order of the checks makes no difference there.
+
+### What the review found
+
+Before the pull request, three reviewers went through the step independently, each with one
+question: is the code right, is every sentence of the docs true, and do the tests test what
+they say? Each one ran things rather than only reading, and every finding was reproduced
+before it was fixed:
+
+| Found                                        | What could happen                                                                                                        | Fix                                                       |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
+| Error answers checked only by Fastify        | An `AppError` with a code that isn't in the list reached the client as `500 FST_ERR_FAILED_ERROR_SERIALIZATION`          | `sendError()` checks every error answer (Concept 3)       |
+| The `401` test used valid ids and no query   | A `GET` route that validated its input before the token passed it, and told strangers what a request should contain      | The test sends invalid ids and `?limit=0` too (Concept 5) |
+| Fastify's message for a malformed URL        | The `400` repeated the whole URL, query string included                                                                  | Our own message, with the path only (Concept 1)           |
+| Fastify also reads `text/plain`              | A text body got `400 VALIDATION_ERROR`, not the `415` the docs promised                                                  | The API reads JSON only (Concept 1)                       |
+| Plugin errors coded by Fastify's code        | A `403` from `@fastify/static` came as `BAD_REQUEST`, which the README listed only under `400` and `414`                 | Codes go by status (Concept 1)                            |
+| The HTTP server answers some requests itself | Unreadable requests, headers over 16 KB, slow requests and requests during a shutdown get Fastify's shape, no request id | The README and `/docs` name these exceptions (Exercise 7) |
+
+It also found sentences that said a little more than the truth: "each line of a request
+names the user" (not the first one, "incoming request", logged before the token is
+checked); "nobody can find out which emails have an account" in the login route's
+description (signing up tells, with `EMAIL_TAKEN`); two "Build it yourself" steps that
+didn't work as written; and Rule 8 counting one type assertion where there were two.
+
+The first row is the lesson. That very bug had been put in on purpose (the table above,
+"An `AppError` with a code that isn't in the list"), and 13 tests caught it: they expected
+`404` and got `500`. Nobody looked at the body of that `500`. A test that checks the whole
+answer, not only its status, would have shown Fastify's shape at once. When a test is about
+what a client receives, check all of what it receives.
 
 ### Build it yourself
 
-1. Register `@fastify/swagger` with `jsonSchemaTransform` and open `/docs/json`. Read what
-   it generates for one route before adding anything.
-2. Add `tags`, `summary` and `operationId` to one route, and `security: []` to a public
-   one. Watch its padlock disappear on `/docs`.
+1. Register `@fastify/swagger` with `jsonSchemaTransform`, and `@fastify/swagger-ui` with
+   `routePrefix: '/docs'` (the first builds the document, the second serves it). Open
+   `/docs/json` and read what it generates for one route before adding anything.
+2. Add the `bearerAuth` security scheme and the global `security: [{ bearerAuth: [] }]`:
+   every route gets a padlock on `/docs`. Then add `tags`, `summary` and `operationId` to
+   one route, and `security: []` to a public one, and watch its padlock disappear.
 3. Name `Task` with `.meta({ id: 'Task' })` and find its `TaskInput` copy in the document.
    Then write `usedSchemasOnly()`.
 4. Write `errorResponses()` and give one route its error answers. Make an `AppError` use a
-   code that isn't in the list (with `as` to get it past TypeScript), and watch the tests
-   get a `500`.
+   code that isn't in the list (with `as` to get it past TypeScript), and look at the whole
+   answer, not only its status: Fastify's shape. Then write `sendError()`.
 5. Commit the document with `toMatchFileSnapshot()`, change a route's summary, and watch
    the test fail until you run `npm run openapi`.
 6. Move `authenticate` from `preHandler` to `onRequest` in one file, after writing the test
-   that sends broken JSON without a token. Watch it fail first.
+   that sends invalid ids, an invalid query and broken JSON without a token. Watch it fail
+   first.
 7. Record the logs in a test, add a `preHandler` that logs `request.body`, and watch the
    secrets test fail.
 
@@ -2488,6 +2571,11 @@ As in chapter 5, each new test was run against the bug it's meant to catch:
    comment. How would you pass `request.id` down to Prisma, and what would it cost?
 6. **Docs behind a switch.** Some teams hide `/docs` in production. Add a `DOCS_ENABLED`
    setting. Is hiding the docs a real defense? What does the API reveal anyway?
+7. **Below the API.** The HTTP server answers a few requests itself, in Fastify's shape: one
+   it can't read, headers over 16 KB, a request slower than 30 seconds (README, "Errors").
+   Answer them in ours with Fastify's `clientErrorHandler` option, which gets the raw
+   socket. Test it with `node:net`, since `app.inject()` never goes through a socket. What
+   would an `x-request-id` mean for a request that could not even be read?
 
 ### Words to know
 

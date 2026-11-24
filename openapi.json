@@ -3,7 +3,7 @@
   "info": {
     "title": "Production REST API",
     "version": "1.0.0",
-    "description": "A task manager's API: workspaces that people share with roles, projects in a\nworkspace, and tasks in a project.\n\n**Logging in.** `POST /auth/register` or `POST /auth/login` answers with an\n`accessToken` and a `refreshToken`. Send the access token on every other\nrequest, as `Authorization: Bearer <accessToken>`. It's short-lived: when it\nexpires, trade the refresh token for new ones at `POST /auth/refresh`.\n\n**Errors.** Every error has the same shape:\n`{ \"error\": { \"code\": \"EMAIL_TAKEN\", \"message\": \"...\" } }`. Programs switch on\n`code` (the `Error` schema lists them all); `message` is for people and its\nwording may change.\n\n**Request ids.** Every answer has an `x-request-id` header. Quote it when you\nreport a problem: it finds that request's log lines.",
+    "description": "A task manager's API: workspaces that people share with roles, projects in a\nworkspace, and tasks in a project.\n\n**Logging in.** `POST /auth/register` or `POST /auth/login` answers with an\n`accessToken` and a `refreshToken`. Send the access token on every other\nrequest, as `Authorization: Bearer <accessToken>`. It's short-lived: when it\nexpires, trade the refresh token for new ones at `POST /auth/refresh`.\n\n**Errors.** Every error has the same shape:\n`{ \"error\": { \"code\": \"EMAIL_TAKEN\", \"message\": \"...\" } }`. Programs switch on\n`code` (the `Error` schema lists them all); `message` is for people and its\nwording may change. The only exceptions come from the HTTP server itself, for\nrequests that never reach the API: one it can't read (400), headers over\n16 KB (431), a request that takes over 30 seconds to arrive (408), or one that\narrives during a shutdown (503). Those answers have no `code`.\n\n**Request ids.** Every answer from the API has an `x-request-id` header.\nQuote it when you report a problem: it finds that request's log lines.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -851,7 +851,7 @@
         "tags": [
           "auth"
         ],
-        "description": "An unknown email and a wrong password get the same answer (INVALID_CREDENTIALS), so nobody can find out which emails have an account. Rate limited, like sign-up.",
+        "description": "An unknown email and a wrong password get the same answer (INVALID_CREDENTIALS), so logging in never tells whether an email has an account (signing up does: EMAIL_TAKEN). Rate limited, like sign-up.",
         "requestBody": {
           "required": true,
           "content": {

@@ -134,16 +134,22 @@ problem. Every code, by status:
 | 410    | `INVITATION_EXPIRED`                                                                       |
 | 413    | `PAYLOAD_TOO_LARGE` (a body over 64 KB)                                                    |
 | 414    | `BAD_REQUEST` (an id in the path longer than 100 characters)                               |
-| 415    | `UNSUPPORTED_MEDIA_TYPE` (a body in a format the API doesn't read, such as a form)         |
+| 415    | `UNSUPPORTED_MEDIA_TYPE` (a body that isn't JSON, even `text/plain`)                       |
 | 429    | `RATE_LIMITED` (too many login, sign-up or refresh attempts)                               |
 | 500    | `INTERNAL_ERROR`, with a generic message: the details only go to the logs                  |
 
-`/docs` lists the statuses each route can answer, with an example of each. The one answer in
-another shape is the readiness probe's `503`, `{ "status": "error", "database": "down" }`,
-which is meant for load balancers.
+`BAD_REQUEST` covers any other client error, with the status that fits (a URL that isn't valid
+gets `400`). `/docs` lists the statuses each route can answer, with an example of each.
 
-Every answer carries an `x-request-id` header. Quote it in a bug report: it finds that
-request's lines in the logs. A proxy in front of the API can send its own `x-request-id`, and
+Two kinds of answers have another shape. The readiness probe's `503` is
+`{ "status": "error", "database": "down" }`, for load balancers. And the HTTP server itself
+answers a few requests that never reach the API, in Fastify's shape
+(`{ "statusCode", "error", "message" }`, with no `code`): one it can't read (`400`), headers
+over 16 KB (`431`), a request that takes over 30 seconds to arrive (`408`), and one that
+arrives while the server shuts down (`503`).
+
+Every answer from the API carries an `x-request-id` header. Quote it in a bug report: it finds
+that request's lines in the logs. A proxy in front of the API can send its own `x-request-id`, and
 the API keeps it if it looks like an id (letters, digits and `-_.:`, at most 128 characters),
 so one id follows the request through every service.
 

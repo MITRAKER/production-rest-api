@@ -34,7 +34,8 @@ const schemas = {
     summary: 'Log in',
     description:
       'An unknown email and a wrong password get the same answer (INVALID_CREDENTIALS), so ' +
-      'nobody can find out which emails have an account. Rate limited, like sign-up.',
+      'logging in never tells whether an email has an account (signing up does: EMAIL_TAKEN). ' +
+      'Rate limited, like sign-up.',
     body: LoginBody,
     response: { 200: AuthResponse.describe('Logged in'), ...errorResponses(400, 401, 429) },
   },

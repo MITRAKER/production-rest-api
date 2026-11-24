@@ -64,8 +64,11 @@ export async function buildApp(env: Env, options: BuildOptions = {}): Promise<Fa
     // Power of Ten rule 3: explicit upper bounds on what a client can make us hold.
     bodyLimit: LIMITS.bodyBytes,
     requestTimeout: LIMITS.requestTimeoutMs,
-    // "/workspaces/" is the same address as "/workspaces" (and the docs show only that one).
-    routerOptions: { ignoreTrailingSlash: true },
+    routerOptions: {
+      // "/workspaces/" is the same address as "/workspaces" (and the docs show only that one).
+      ignoreTrailingSlash: true,
+      maxParamLength: LIMITS.pathParamChars,
+    },
     // The errors Fastify raises before it finds a route get our error shape too.
     frameworkErrors: answerFrameworkError,
   });
@@ -73,6 +76,10 @@ export async function buildApp(env: Env, options: BuildOptions = {}): Promise<Fa
   // Let Zod schemas validate requests and serialize responses.
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
+  // The API reads JSON only. Fastify would also read text/plain (what fetch()
+  // sends for a string body without a content type) and hand the route a
+  // string: such a body now gets 415 UNSUPPORTED_MEDIA_TYPE, which says what's wrong.
+  app.removeContentTypeParser('text/plain');
 
   // Echo the request id back so a client can quote it in a bug report,
   // and we can find the exact log lines for that request.

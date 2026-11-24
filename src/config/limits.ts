@@ -39,6 +39,11 @@ export const LIMITS = {
   /** A pagination cursor is a short opaque string; anything longer is rejected. */
   cursorMaxLength: 512,
   /**
+   * The longest path parameter the router accepts (Fastify's maxParamLength):
+   * our ids are 36 characters. A longer one gets 414 before any route runs.
+   */
+  pathParamChars: 100,
+  /**
    * The most tasks a workspace can hold: MAX_PROJECTS_PER_WORKSPACE times
    * MAX_TASKS_PER_PROJECT may not be more. Removing a member unassigns all
    * their tasks in one statement, while the workspace is locked; for 100,000

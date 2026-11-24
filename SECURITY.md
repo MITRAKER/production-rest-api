@@ -51,9 +51,10 @@ exactly what we want to hear about.
 - **Rate limiting** on the authentication endpoints slows down brute-force attacks.
 - **The token is checked first.** On every protected route, the access token is checked in
   the very first step of a request (Fastify's `onRequest` hook). Without a valid one the
-  answer is `401` before the body is read or validated, so a stranger can't make the API
-  parse a body, or learn from a validation error what a body should contain. A test sends a
-  broken body without a token to every protected route listed in the OpenAPI document.
+  answer is `401` before anything else is read or validated, so a stranger can't make the
+  API parse a body, or learn from a validation error what a request should contain. A test
+  sends every protected route in the OpenAPI document an invalid id, an invalid query and a
+  broken body, without a token, and expects `401`.
 - **Workspaces** check membership before anything else, so outsiders get `404` and can't
   even learn that a workspace exists. Roles are checked in one policy file, and you can only
   act on people with a lower role than yours. Every change that could leave a workspace
@@ -85,13 +86,15 @@ exactly what we want to hear about.
   gets a generic `500 INTERNAL_ERROR`. Every error answer uses a code from one fixed list,
   and is checked against the documented `Error` schema before it is sent: one that doesn't
   fit becomes that generic `500`, never a body in another shape. Fastify's internal error
-  names (`FST_ERR_…`) are translated to our codes, the errors Fastify raises before it finds
-  a route (a malformed URL, an overlong id) get the same shape, and a "route not found"
-  message repeats the path but never the query string, which could hold a token.
-- **Logs never hold a secret.** The `Authorization` and `Cookie` headers are redacted, and a
-  test records every log line at the most verbose level (`trace`) through a sign-up, a login,
-  a token refresh, an invitation, a failed login and a bad token, then checks that no
-  password or token appears anywhere. Each line of an authenticated request names the user's
+  names (`FST_ERR_…`) are translated to our codes, and the errors Fastify raises before it
+  finds a route (a malformed URL, an overlong id) get the same shape. Error messages name
+  the path of a URL but never repeat its query string.
+- **Logs never hold a secret.** The API takes passwords and tokens only in headers and
+  bodies, never in a URL, because URLs are logged (as in any web server's access log).
+  Bodies are never logged, the `Authorization` and `Cookie` headers are redacted, and a test
+  records every log line at the most verbose level (`trace`) through a sign-up, a login, a
+  token refresh, an invitation, a failed login and a bad token, then checks that no password
+  or token appears anywhere. Every line logged after the token checks out names the user's
   id, and reusing a refresh token is logged as a warning, naming the user and the session
   (never the token). A request id from upstream (`x-request-id`) is kept only if it looks
   like an id (letters, digits and `-_.:`, at most 128 characters). Any client can send one,
