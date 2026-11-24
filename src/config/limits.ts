@@ -7,7 +7,7 @@
  * the cleanup this will need.
  *
  * The fixed limits are here. The ones an operator may tune per deployment
- * (database pool size, workspace quotas) are environment variables,
+ * (database pool size, quotas) are environment variables,
  * validated in env.ts with their own upper bounds.
  */
 export const LIMITS = {
@@ -33,4 +33,17 @@ export const LIMITS = {
   shutdownTimeoutMs: 10_000,
   /** No list endpoint ever returns more items than this. */
   listMax: 1_000,
+  /** Paginated lists: items per page when the client doesn't say, and the most it may ask for. */
+  pageSizeDefault: 20,
+  pageSizeMax: 100,
+  /** A pagination cursor is a short opaque string; anything longer is rejected. */
+  cursorMaxLength: 512,
+  /**
+   * The most tasks a workspace can hold: MAX_PROJECTS_PER_WORKSPACE times
+   * MAX_TASKS_PER_PROJECT may not be more. Removing a member unassigns all
+   * their tasks in one statement, while the workspace is locked; for 100,000
+   * tasks that took about 1.5 s, well inside the 10 s timeouts. Task lists
+   * are paginated, so this bounds work and storage, not response size.
+   */
+  tasksPerWorkspaceMax: 100_000,
 } as const;

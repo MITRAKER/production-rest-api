@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Text } from '../../lib/text.js';
 
 /**
  * Zod schemas describe the exact shape of each request and response.
@@ -9,26 +10,31 @@ import { z } from 'zod';
 
 // Bound the raw input (Power of Ten rule 3), trim and lowercase it,
 // then check it's an email no longer than the 254 characters email allows.
-export const Email = z.string().max(320).trim().toLowerCase().pipe(z.email().max(254));
+export const Email = Text.max(320).trim().toLowerCase().pipe(z.email().max(254));
 
 // Every input has an upper bound (Power of Ten rule 3). This one isn't what
 // protects the CPU: argon2 costs about the same for any password length (it
 // first condenses the password with a fast hash). The rate limit does that.
-const Password = z.string().min(8, 'must be at least 8 characters').max(128);
+const Password = Text.min(8, 'must be at least 8 characters').max(128);
 
 export const RegisterBody = z.object({
   email: Email,
   password: Password,
-  name: z.string().trim().min(1).max(100),
+  name: Text.trim().min(1).max(100),
 });
 
 export const LoginBody = z.object({
   email: Email,
+  // Not Text, on purpose. A login must accept every password that sign-up
+  // ever accepted, or it locks those accounts out for good (there's no
+  // password reset yet). Sign-up took any string before Text existed, and
+  // that's harmless here: a password is only hashed and compared, never
+  // stored, so the database never sees it.
   password: z.string().min(1).max(128),
 });
 
 export const RefreshBody = z.object({
-  refreshToken: z.string().min(1).max(200),
+  refreshToken: Text.min(1).max(200),
 });
 
 export const PublicUser = z.object({

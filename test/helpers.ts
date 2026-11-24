@@ -114,3 +114,60 @@ export async function createTeam(app: FastifyInstance) {
 
   return { workspaceId, url: `/workspaces/${workspaceId}`, owner, admin, member, outsider };
 }
+
+/** A project as the API returns it. */
+export interface ProjectJson {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description: string;
+  createdById: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A task as the API returns it. */
+export interface TaskJson {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  title: string;
+  description: string;
+  status: string;
+  priority: string;
+  dueDate: string | null;
+  assigneeId: string | null;
+  createdById: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One page of a paginated list. */
+export interface PageJson<T> {
+  data: T[];
+  nextCursor: string | null;
+}
+
+export async function createProject(api: Client, workspaceId: string, name = 'Website') {
+  const res = await api.post(`/workspaces/${workspaceId}/projects`, { name });
+  if (res.statusCode !== 201) throw new Error(`create project failed: ${res.body}`);
+  return res.json<ProjectJson>();
+}
+
+export async function createTask(
+  api: Client,
+  tasksUrl: string,
+  body: object = { title: 'A task' },
+) {
+  const res = await api.post(tasksUrl, body);
+  if (res.statusCode !== 201) throw new Error(`create task failed: ${res.body}`);
+  return res.json<TaskJson>();
+}
+
+/** The standard team (see createTeam), plus a project "Website" in their workspace. */
+export async function createTeamWithProject(app: FastifyInstance) {
+  const team = await createTeam(app);
+  const project = await createProject(team.owner.api, team.workspaceId);
+  const projectUrl = `${team.url}/projects/${project.id}`;
+  return { ...team, project, projectUrl, tasksUrl: `${projectUrl}/tasks` };
+}

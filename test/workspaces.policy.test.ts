@@ -13,6 +13,9 @@ const expected: Record<Action, { OWNER: boolean; ADMIN: boolean; MEMBER: boolean
   'members:remove': { OWNER: true, ADMIN: true, MEMBER: false },
   'members:changeRole': { OWNER: true, ADMIN: false, MEMBER: false },
   'invitations:manage': { OWNER: true, ADMIN: true, MEMBER: false },
+  'projects:manage': { OWNER: true, ADMIN: true, MEMBER: false },
+  'tasks:write': { OWNER: true, ADMIN: true, MEMBER: true },
+  'tasks:deleteAny': { OWNER: true, ADMIN: true, MEMBER: false },
 };
 
 describe('can(role, action)', () => {

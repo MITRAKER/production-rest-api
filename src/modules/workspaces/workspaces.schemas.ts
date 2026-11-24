@@ -1,13 +1,14 @@
 import { z } from 'zod';
+import { Id } from '../../lib/ids.js';
+import { Text } from '../../lib/text.js';
 
 export const Role = z.enum(['OWNER', 'ADMIN', 'MEMBER']);
 
-// Path parameters are user input too. Validating the uuid format turns a
-// malformed id into a clean 400, instead of a database error (500).
-export const WorkspaceParams = z.object({ workspaceId: z.uuid() });
-export const MemberParams = WorkspaceParams.extend({ userId: z.uuid() });
+// Path parameters are user input too: each id is checked and lower-cased (src/lib/ids.ts).
+export const WorkspaceParams = z.object({ workspaceId: Id });
+export const MemberParams = WorkspaceParams.extend({ userId: Id });
 
-const Name = z.string().trim().min(1).max(100);
+const Name = Text.trim().min(1).max(100);
 
 export const CreateWorkspaceBody = z.object({ name: Name });
 export const UpdateWorkspaceBody = z.object({ name: Name });
@@ -30,7 +31,9 @@ export const Member = z.object({
   joinedAt: z.date(),
 });
 
-// Lists are wrapped in { data: [...] } so step 5 can add pagination
-// fields next to `data` without breaking existing clients.
+// Lists are wrapped in { data: [...] }, so fields can be added next to `data`
+// without breaking existing clients. The project and task lists add
+// `nextCursor` there; these two are short (bounded by their quotas) and
+// still come in one piece.
 export const WorkspaceList = z.object({ data: z.array(WorkspaceSummary) });
 export const MemberList = z.object({ data: z.array(Member) });

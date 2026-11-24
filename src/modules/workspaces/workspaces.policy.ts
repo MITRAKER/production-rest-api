@@ -22,7 +22,10 @@ export type Action =
   | 'members:read'
   | 'members:remove'
   | 'members:changeRole'
-  | 'invitations:manage';
+  | 'invitations:manage'
+  | 'projects:manage'
+  | 'tasks:write'
+  | 'tasks:deleteAny';
 
 /** The minimum role needed for each action. */
 export const MIN_ROLE: Record<Action, WorkspaceRole> = {
@@ -33,6 +36,12 @@ export const MIN_ROLE: Record<Action, WorkspaceRole> = {
   'members:remove': 'ADMIN',
   'members:changeRole': 'OWNER',
   'invitations:manage': 'ADMIN',
+  // Projects shape the workspace: creating, renaming and deleting them is for admins.
+  'projects:manage': 'ADMIN',
+  // Tasks are everyday work: every member can create and edit them.
+  'tasks:write': 'MEMBER',
+  // Deleting a task: its creator always may (see TaskService.delete); anyone else needs this.
+  'tasks:deleteAny': 'ADMIN',
 };
 
 export function can(role: WorkspaceRole, action: Action): boolean {

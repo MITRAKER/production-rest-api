@@ -18,19 +18,20 @@ and tasks.
 
 ## Tech stack
 
-| Area          | Choice                                                                        |
-| ------------- | ----------------------------------------------------------------------------- |
-| Language      | TypeScript 6 (strictest settings) on Node.js 26 LTS                           |
-| Web framework | Fastify 5                                                                     |
-| Database      | PostgreSQL 16 with Prisma ORM                                                 |
-| Validation    | Zod (via fastify-type-provider-zod)                                           |
-| Auth          | JWT access tokens, rotating refresh tokens, argon2id, rate limiting           |
-| Authorization | Role-based (owner / admin / member), with row locks protecting the invariants |
-| Testing       | Vitest against a real Postgres, with a coverage threshold                     |
-| Code quality  | ESLint with the NASA/JPL "Power of Ten" rules, Prettier, commitlint, Husky    |
-| Security      | CodeQL, dependency review, npm audit, Trivy, OpenSSF Scorecard, Dependabot    |
-| Packaging     | Docker (multi-stage, pinned by digest, non-root) and Docker Compose           |
-| CI/CD         | GitHub Actions; tagged releases publish images to GitHub Container Registry   |
+| Area          | Choice                                                                             |
+| ------------- | ---------------------------------------------------------------------------------- |
+| Language      | TypeScript 6 (strictest settings) on Node.js 26 LTS                                |
+| Web framework | Fastify 5                                                                          |
+| Database      | PostgreSQL 16 with Prisma ORM                                                      |
+| Validation    | Zod (via fastify-type-provider-zod)                                                |
+| Auth          | JWT access tokens, rotating refresh tokens, argon2id, rate limiting                |
+| Authorization | Role-based (owner / admin / member), with database locks protecting the invariants |
+| API design    | Nested resources, keyset (cursor) pagination, allow-listed filters and sorts       |
+| Testing       | Vitest against a real Postgres, with a coverage threshold                          |
+| Code quality  | ESLint with the NASA/JPL "Power of Ten" rules, Prettier, commitlint, Husky         |
+| Security      | CodeQL, dependency review, npm audit, Trivy, OpenSSF Scorecard, Dependabot         |
+| Packaging     | Docker (multi-stage, pinned by digest, non-root) and Docker Compose                |
+| CI/CD         | GitHub Actions; tagged releases publish images to GitHub Container Registry        |
 
 ## Getting started
 
@@ -62,26 +63,37 @@ Or run everything in containers: `docker compose up --build`.
 
 ## Endpoints
 
-| Method               | Path                                                 | Description                                             |
-| -------------------- | ---------------------------------------------------- | ------------------------------------------------------- |
-| GET                  | `/health/live`                                       | Liveness probe (process is up)                          |
-| GET                  | `/health/ready`                                      | Readiness probe (database reachable)                    |
-| POST                 | `/auth/register`                                     | Create an account, returns access + refresh tokens      |
-| POST                 | `/auth/login`                                        | Log in, returns access + refresh tokens                 |
-| POST                 | `/auth/refresh`                                      | Exchange a refresh token for a new pair (rotation)      |
-| POST                 | `/auth/logout`                                       | Revoke the session's refresh tokens                     |
-| GET                  | `/users/me`                                          | Current user (requires `Authorization: Bearer <token>`) |
-| POST                 | `/workspaces`                                        | Create a workspace (you become its owner)               |
-| GET                  | `/workspaces`                                        | Workspaces you belong to, with your role                |
-| GET / PATCH / DELETE | `/workspaces/:workspaceId`                           | Read (member), rename (admin+), delete (owner)          |
-| GET                  | `/workspaces/:workspaceId/members`                   | List members and roles                                  |
-| PATCH / DELETE       | `/workspaces/:workspaceId/members/:userId`           | Change role (owner), remove or leave                    |
-| POST / GET           | `/workspaces/:workspaceId/invitations`               | Invite by email, list pending (admin+)                  |
-| DELETE               | `/workspaces/:workspaceId/invitations/:invitationId` | Revoke an invitation (admin+)                           |
-| POST                 | `/invitations/accept`                                | Join a workspace with an invitation token               |
+| Method               | Path                                                         | Description                                              |
+| -------------------- | ------------------------------------------------------------ | -------------------------------------------------------- |
+| GET                  | `/health/live`                                               | Liveness probe (process is up)                           |
+| GET                  | `/health/ready`                                              | Readiness probe (database reachable)                     |
+| POST                 | `/auth/register`                                             | Create an account, returns access + refresh tokens       |
+| POST                 | `/auth/login`                                                | Log in, returns access + refresh tokens                  |
+| POST                 | `/auth/refresh`                                              | Exchange a refresh token for a new pair (rotation)       |
+| POST                 | `/auth/logout`                                               | Revoke the session's refresh tokens                      |
+| GET                  | `/users/me`                                                  | Current user (requires `Authorization: Bearer <token>`)  |
+| POST                 | `/workspaces`                                                | Create a workspace (you become its owner)                |
+| GET                  | `/workspaces`                                                | Workspaces you belong to, with your role                 |
+| GET / PATCH / DELETE | `/workspaces/:workspaceId`                                   | Read (member), rename (admin+), delete (owner)           |
+| GET                  | `/workspaces/:workspaceId/members`                           | List members and roles                                   |
+| PATCH / DELETE       | `/workspaces/:workspaceId/members/:userId`                   | Change role (owner), remove or leave                     |
+| POST / GET           | `/workspaces/:workspaceId/invitations`                       | Invite by email, list pending (admin+)                   |
+| DELETE               | `/workspaces/:workspaceId/invitations/:invitationId`         | Revoke an invitation (admin+)                            |
+| POST                 | `/invitations/accept`                                        | Join a workspace with an invitation token                |
+| POST / GET           | `/workspaces/:workspaceId/projects`                          | Create a project (admin+), list projects                 |
+| GET / PATCH / DELETE | `/workspaces/:workspaceId/projects/:projectId`               | Read (member), rename, or delete with its tasks (admin+) |
+| POST / GET           | `/workspaces/:workspaceId/projects/:projectId/tasks`         | Create a task (member), list with filters and sorting    |
+| GET / PATCH / DELETE | `/workspaces/:workspaceId/projects/:projectId/tasks/:taskId` | Read, edit (member), delete (its creator or admin+)      |
 
 Everything except `/health/*` and `/auth/*` requires `Authorization: Bearer <accessToken>`.
 Non-members get `404` for a workspace's routes, and members without the needed role get `403`.
+
+Project and task lists come one page at a time: `?limit=` sets the page size (20 by default,
+at most 100), and the response's `nextCursor` gets the next page (`&cursor=…`) until it is
+`null`. Tasks can be filtered by `status`, `priority`, `assigneeId` (or `none`), a due date
+range (`dueFrom`, `dueTo`) and title text (`q`), and sorted by `createdAt`, `updatedAt` or
+`dueDate` (`order=asc` or `desc`). [LEARNING.md](./LEARNING.md) chapter 5 explains how it
+works.
 
 Errors always use one shape:
 `{ "error": { "code": "EMAIL_TAKEN", "message": "...", "details": [...] } }`.
@@ -105,7 +117,7 @@ resource limits, short functions, assertions, and zero warnings.
 - [x] JWT authentication with refresh token rotation
 - [x] Professional quality: CI/CD, security scanning, NASA/JPL coding rules
 - [x] Workspaces, invitations and role-based access control
-- [ ] Projects and tasks with pagination, filtering, sorting
+- [x] Projects and tasks with pagination, filtering, sorting
 - [ ] Consistent errors, OpenAPI docs
 - [ ] Seed data and a recruiter-ready README
 

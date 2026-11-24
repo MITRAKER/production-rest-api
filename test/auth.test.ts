@@ -1,3 +1,4 @@
+import argon2 from 'argon2';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { alice, buildTestApp, registerUser, resetDb, sleep, warmUpPool } from './helpers.js';
@@ -96,6 +97,20 @@ describe('POST /auth/login', () => {
     expect(wrongPassword.statusCode).toBe(401);
     expect(unknownEmail.statusCode).toBe(401);
     expect(wrongPassword.json()).toEqual(unknownEmail.json());
+  });
+
+  it('still accepts a password that sign-up accepted before the NUL character was refused', async () => {
+    // Until step 5, sign-up took any string. An account whose password holds
+    // a NUL must not be locked out: the password is only hashed and compared.
+    const password = 'correct horse\u0000battery';
+    const passwordHash = await argon2.hash(password, { type: argon2.argon2id });
+    await app.prisma.user.create({ data: { email: 'old@example.com', name: 'Old', passwordHash } });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/login',
+      payload: { email: 'old@example.com', password },
+    });
+    expect(res.statusCode).toBe(200);
   });
 });
 

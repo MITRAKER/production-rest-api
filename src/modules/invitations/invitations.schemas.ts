@@ -1,8 +1,10 @@
 import { z } from 'zod';
+import { Id } from '../../lib/ids.js';
+import { Text } from '../../lib/text.js';
 import { Email } from '../auth/auth.schemas.js';
 import { Role, WorkspaceParams } from '../workspaces/workspaces.schemas.js';
 
-export const InvitationParams = WorkspaceParams.extend({ invitationId: z.uuid() });
+export const InvitationParams = WorkspaceParams.extend({ invitationId: Id });
 
 // OWNER is deliberately not allowed here: ownership is never handed out by
 // invitation, only by an existing owner promoting an existing member.
@@ -13,7 +15,7 @@ export const CreateInvitationBody = z.object({
 });
 
 export const AcceptInvitationBody = z.object({
-  token: z.string().min(1).max(200),
+  token: Text.min(1).max(200),
 });
 
 export const Invitation = z.object({

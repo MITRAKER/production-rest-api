@@ -5,10 +5,10 @@
   //
   // Power of Ten rule 10: every check the compiler offers is switched on.
   "compilerOptions": {
-    "target": "ES2023",
+    "target": "ES2024",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2023"],
+    "lib": ["ES2024"],
     "types": ["node"],
     "strict": true,
     "noUncheckedIndexedAccess": true,

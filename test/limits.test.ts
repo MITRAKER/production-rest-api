@@ -1,11 +1,20 @@
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { buildTestApp, invite, resetDb, signUp, warmUpPool } from './helpers.js';
+import {
+  buildTestApp,
+  createProject,
+  createTask,
+  invite,
+  resetDb,
+  signUp,
+  warmUpPool,
+} from './helpers.js';
 
 /**
- * Power of Ten rule 3: what a user can have at once (workspaces, members,
- * pending invitations) is bounded. The quotas are environment variables, so
- * the tests can use tiny ones.
+ * Power of Ten rule 3: what can exist at once (workspaces per user; members,
+ * pending invitations and projects per workspace; tasks per project) is
+ * bounded. The quotas are environment variables, so the tests can use tiny
+ * ones.
  */
 let app: FastifyInstance;
 
@@ -14,6 +23,8 @@ beforeAll(async () => {
     MAX_WORKSPACES_PER_USER: '2',
     MAX_MEMBERS_PER_WORKSPACE: '2',
     MAX_PENDING_INVITATIONS: '2',
+    MAX_PROJECTS_PER_WORKSPACE: '2',
+    MAX_TASKS_PER_PROJECT: '2',
   });
 });
 afterAll(async () => {
@@ -149,5 +160,82 @@ describe('members per workspace', () => {
     ]);
     expect(results.map((r) => r.statusCode).sort((a, b) => a - b)).toEqual([200, 409]);
     expect(await app.prisma.membership.count({ where: { workspaceId } })).toBe(2);
+  });
+});
+
+describe('projects per workspace', () => {
+  it('refuses to create more projects than the quota, until one is deleted', async () => {
+    const alice = await signUp(app, 'Alice');
+    const workspaceId = await createWorkspace(alice.api, 'Acme');
+    const first = await createProject(alice.api, workspaceId, 'One');
+    await createProject(alice.api, workspaceId, 'Two');
+
+    const url = `/workspaces/${workspaceId}/projects`;
+    const res = await alice.api.post(url, { name: 'Three' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('LIMIT_REACHED');
+
+    await alice.api.delete(`${url}/${first.id}`);
+    expect((await alice.api.post(url, { name: 'Three' })).statusCode).toBe(201);
+  });
+
+  it('holds when several creations arrive at the same instant', async () => {
+    const alice = await signUp(app, 'Alice');
+    const workspaceId = await createWorkspace(alice.api, 'Acme');
+    const url = `/workspaces/${workspaceId}/projects`;
+
+    for (const round of [1, 2, 3]) {
+      await app.prisma.project.deleteMany({ where: { workspaceId } });
+      await createProject(alice.api, workspaceId, `First ${String(round)}`);
+
+      await warmUpPool(app);
+      // One slot left, five requests racing for it.
+      const names = ['A', 'B', 'C', 'D', 'E'];
+      const results = await Promise.all(names.map((name) => alice.api.post(url, { name })));
+      const codes = results.map((r) => r.statusCode).sort((a, b) => a - b);
+      expect(codes).toEqual([201, 409, 409, 409, 409]);
+      expect(await app.prisma.project.count({ where: { workspaceId } })).toBe(2);
+    }
+  });
+});
+
+describe('tasks per project', () => {
+  async function aliceWithProject() {
+    const alice = await signUp(app, 'Alice');
+    const workspaceId = await createWorkspace(alice.api, 'Acme');
+    const project = await createProject(alice.api, workspaceId);
+    const tasksUrl = `/workspaces/${workspaceId}/projects/${project.id}/tasks`;
+    return { alice, projectId: project.id, tasksUrl };
+  }
+
+  it('refuses to create more tasks than the quota, until one is deleted', async () => {
+    const { alice, tasksUrl } = await aliceWithProject();
+    const first = await createTask(alice.api, tasksUrl);
+    await createTask(alice.api, tasksUrl);
+
+    const res = await alice.api.post(tasksUrl, { title: 'One too many' });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('LIMIT_REACHED');
+
+    await alice.api.delete(`${tasksUrl}/${first.id}`);
+    expect((await alice.api.post(tasksUrl, { title: 'Room again' })).statusCode).toBe(201);
+  });
+
+  it('holds when several creations arrive at the same instant', async () => {
+    const { alice, projectId, tasksUrl } = await aliceWithProject();
+
+    for (const round of [1, 2, 3]) {
+      await app.prisma.task.deleteMany({ where: { projectId } });
+      await createTask(alice.api, tasksUrl, { title: `First ${String(round)}` });
+
+      await warmUpPool(app);
+      // One slot left, five requests racing for it.
+      const results = await Promise.all(
+        [1, 2, 3, 4, 5].map(() => alice.api.post(tasksUrl, { title: 'Racing' })),
+      );
+      const codes = results.map((r) => r.statusCode).sort((a, b) => a - b);
+      expect(codes).toEqual([201, 409, 409, 409, 409]);
+      expect(await app.prisma.task.count({ where: { projectId } })).toBe(2);
+    }
   });
 });

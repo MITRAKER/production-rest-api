@@ -1,14 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { NUL_MESSAGE, UNICODE_MESSAGE } from '../src/lib/text.js';
 import * as authSchemas from '../src/modules/auth/auth.schemas.js';
 import * as invitationSchemas from '../src/modules/invitations/invitations.schemas.js';
+import * as projectSchemas from '../src/modules/projects/projects.schemas.js';
+import * as taskSchemas from '../src/modules/tasks/tasks.schemas.js';
 import * as workspaceSchemas from '../src/modules/workspaces/workspaces.schemas.js';
 
 /**
- * Power of Ten rule 3, checked automatically: every value a client can send
- * must have an upper bound. This test converts every input schema (exports
- * named *Body, *Params or *Query) to JSON Schema and checks that every string
- * has a maxLength (or a fixed format) and every array has a maxItems.
+ * Rules that every input schema (exports named *Body, *Params or *Query) must
+ * follow, checked automatically on all of them:
+ *
+ * - Power of Ten rule 3: every value a client can send has an upper bound.
+ *   Each schema is converted to JSON Schema, and every string must have a
+ *   maxLength (or a fixed format) and every array a maxItems.
+ * - No free-text string may contain the NUL character, which Postgres text
+ *   can't hold, or half of a UTF-16 surrogate pair, which the database driver
+ *   would quietly change (see src/lib/text.ts).
  *
  * When you add a schema module, add it to `modules` below.
  */
@@ -16,12 +24,14 @@ const modules: Record<string, Record<string, unknown>> = {
   auth: authSchemas,
   workspaces: workspaceSchemas,
   invitations: invitationSchemas,
+  projects: projectSchemas,
+  tasks: taskSchemas,
 };
 
 type JsonNode = Record<string, unknown>;
 
-/** Strings of these formats have a fixed, short length. */
-const FIXED_LENGTH_FORMATS = new Set(['uuid']);
+/** Strings of these formats have a fixed, short length ("date" is YYYY-MM-DD). */
+const FIXED_LENGTH_FORMATS = new Set(['uuid', 'date']);
 const MAX_NODES = 10_000;
 
 function isObject(value: unknown): value is JsonNode {
@@ -74,6 +84,10 @@ const inputSchemas = Object.entries(modules).flatMap(([moduleName, exports]) =>
     .map(([name, value]) => ({ name: `${moduleName}.${name}`, schema: value as z.ZodType })),
 );
 
+function toJson(schema: z.ZodType): JsonNode {
+  return z.toJSONSchema(schema, { io: 'input', unrepresentable: 'any' });
+}
+
 describe('every client input is bounded (Power of Ten rule 3)', () => {
   it('finds the input schemas', () => {
     expect(inputSchemas.length).toBeGreaterThan(0);
@@ -81,8 +95,58 @@ describe('every client input is bounded (Power of Ten rule 3)', () => {
 
   for (const { name, schema } of inputSchemas) {
     it(name, () => {
-      const json = z.toJSONSchema(schema, { io: 'input', unrepresentable: 'any' });
-      expect(unboundedParts(json as JsonNode)).toEqual([]);
+      expect(unboundedParts(toJson(schema))).toEqual([]);
+    });
+  }
+});
+
+/** The top-level fields that take free text: strings that aren't an id, a date, an email or a fixed value. */
+function freeTextFields(json: JsonNode): string[] {
+  const properties = isObject(json['properties']) ? json['properties'] : {};
+  return Object.entries(properties)
+    .filter(([, node]) => isObject(node) && node['type'] === 'string')
+    .filter(([, node]) => !['format', 'enum', 'const'].some((key) => key in (node as JsonNode)))
+    .map(([field]) => field);
+}
+
+/**
+ * Free-text fields that accept any string, each for a reason. The login
+ * password must keep accepting every password that sign-up once did (see
+ * LoginBody); it is only hashed, never stored.
+ */
+const ANY_STRING = new Set(['auth.LoginBody.password']);
+
+const textFields = inputSchemas.flatMap(({ name, schema }) =>
+  freeTextFields(toJson(schema)).map((field) => ({ name: `${name}.${field}`, schema, field })),
+);
+
+/** The messages the field gives for this value (only the field's own issues). */
+function messagesFor(entry: (typeof textFields)[number], value: string): string[] {
+  const result = entry.schema.safeParse({ [entry.field]: value });
+  const issues = result.error?.issues ?? [];
+  return issues.filter((issue) => issue.path[0] === entry.field).map((issue) => issue.message);
+}
+
+describe('no client string may contain NUL (U+0000) or an unpaired surrogate', () => {
+  it('finds the free-text fields', () => {
+    const names = textFields.map((f) => f.name);
+    expect(names).toContain('auth.RegisterBody.password');
+    expect(names).toContain('projects.CreateProjectBody.description');
+    expect(names).toContain('tasks.TaskListQuery.q');
+    expect(names).toContain('tasks.TaskListQuery.cursor');
+    // Every exception is still a free-text field, so the list can't go stale.
+    for (const name of ANY_STRING) expect(names).toContain(name);
+  });
+
+  for (const entry of textFields.filter((f) => !ANY_STRING.has(f.name))) {
+    it(entry.name, () => {
+      expect(messagesFor(entry, 'some text\u0000')).toContain(NUL_MESSAGE);
+      expect(messagesFor(entry, 'some text\uD800')).toContain(UNICODE_MESSAGE);
+      expect(messagesFor(entry, 'some text \uDE00 reversed \uDE00\uD83D')).toContain(
+        UNICODE_MESSAGE,
+      );
+      // A whole surrogate pair is one character, and fine.
+      expect(messagesFor(entry, 'some text \uD83D\uDE00')).not.toContain(UNICODE_MESSAGE);
     });
   }
 });
