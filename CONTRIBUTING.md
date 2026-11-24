@@ -58,13 +58,15 @@ terminal.
    ```
 
 2. Make the change in small commits, with tests (see [Writing tests](#writing-tests)).
-3. Run `npm run check`. It runs the same format, lint, type and test checks as CI.
-4. Push the branch and open a pull request against `main`. Give it a
+3. If you changed what a route accepts or answers, run `npm run openapi` and commit the
+   updated `openapi.json` (see [Documenting the API](#documenting-the-api)).
+4. Run `npm run check`. It runs the same format, lint, type and test checks as CI.
+5. Push the branch and open a pull request against `main`. Give it a
    [Conventional Commits](#commit-messages-and-pull-request-titles) title and fill in the
    template.
-5. Address review comments with new commits rather than force-pushing, so reviewers can see what
+6. Address review comments with new commits rather than force-pushing, so reviewers can see what
    changed.
-6. Once CI is green and the review is approved, the maintainer merges it.
+7. Once CI is green and the review is approved, the maintainer merges it.
 
 ### Keep pull requests small and focused
 
@@ -217,6 +219,9 @@ Tests use [Vitest](https://vitest.dev/) and live in `test/`, one `*.test.ts` fil
 - **Pure logic gets unit tests.** Code without I/O, like the permission rules in
   `workspaces.policy.ts` or `scripts/changelog-section.mjs`, is
   tested directly, without the database.
+- **Read the logs when they matter.** `buildTestApp()` takes a `logStream` that receives
+  every log line, so a test can check what was logged (see `test/logging.test.ts`):
+  `buildTestApp({ LOG_LEVEL: 'trace' }, { logStream: { write: (line) => lines.push(line) } })`.
 
 ```ts
 import type { FastifyInstance } from 'fastify';
@@ -252,6 +257,47 @@ describe('GET /users/me', () => {
 
 Run one file with `npx vitest run test/auth.test.ts`, and everything with coverage with
 `npm run test:coverage` (reports are written to `coverage/`).
+
+## Documenting the API
+
+The documentation at `/docs` is generated from the route schemas, so a route is documented
+where it is defined. Each routes file starts with a `schemas` object:
+
+```ts
+const schemas = {
+  get: {
+    tags: ['projects'], // its group on /docs: one of the tags in src/plugins/openapi.ts
+    operationId: 'getProject', // unique, in camelCase: the function name in generated clients
+    summary: 'Get a project',
+    description: 'For members of its workspace.',
+    params: ProjectParams,
+    response: { 200: Project.describe('The project'), ...errorResponses(400, 401, 404) },
+  },
+} satisfies Record<string, FastifySchema>;
+```
+
+- **Describe every answer**, the successful one too (`.describe('The project')`).
+- **List the errors the route's own logic can give** with `errorResponses()`: `400` if it
+  validates params, a query or a body, `401` if it needs a token, `403` if it checks a role,
+  `404` if it looks something up, `409` for conflicts and quotas. It adds `default` for the
+  errors any route can give (`413`, `415`, `500`...).
+- **Public routes say so** with `security: []`. Every other route needs a bearer token, and
+  checks it in an `onRequest` hook (`app.addHook('onRequest', app.authenticate)`), so that
+  a request without one gets `401` before its body is read.
+- **Name the schemas clients should know** with `.meta({ id: 'Project' })`. The document
+  defines a named schema once, and client generators turn it into a type.
+- **A new error code** goes in `ERROR_CODES` in `src/lib/errors.ts`. Never rename or remove
+  a released code: clients switch on them.
+
+Then run `npm run openapi`. It rewrites `openapi.json`, the committed copy of the document;
+the tests fail until that copy matches the code. Read its diff before you commit: it shows
+the change as clients will see it. Removing or renaming a field, requiring a new field in a
+request, accepting fewer values or changing an error code breaks clients, so it needs a new
+MAJOR version (see [Releasing](#releasing)).
+
+`test/openapi.test.ts` checks that the document is valid OpenAPI 3.1, that every route has
+an `operationId`, a summary, a group and a description for each answer, and that every route
+that needs a token answers `401` without one, before reading the body.
 
 ## Changing the database schema
 
@@ -302,6 +348,7 @@ backward-compatible fixes.
    ```
 
    For the very first release, `package.json` already says `1.0.0`: skip this step.
+   Otherwise, run `npm run openapi` next: the version is also in `openapi.json`.
 
 3. In `CHANGELOG.md`, move the notes from `## [Unreleased]` to a new `## [X.Y.Z] - YYYY-MM-DD`
    heading (today's date), leave the empty `## [Unreleased]` heading above it, and update the

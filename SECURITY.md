@@ -49,6 +49,11 @@ exactly what we want to hear about.
   password. Registration does tell whether an email is already taken (`409`), like most
   sign-up forms; avoiding that would need email verification.
 - **Rate limiting** on the authentication endpoints slows down brute-force attacks.
+- **The token is checked first.** On every protected route, the access token is checked in
+  the very first step of a request (Fastify's `onRequest` hook). Without a valid one the
+  answer is `401` before the body is read or validated, so a stranger can't make the API
+  parse a body, or learn from a validation error what a body should contain. A test sends a
+  broken body without a token to every protected route listed in the OpenAPI document.
 - **Workspaces** check membership before anything else, so outsiders get `404` and can't
   even learn that a workspace exists. Roles are checked in one policy file, and you can only
   act on people with a lower role than yours. Every change that could leave a workspace
@@ -76,8 +81,25 @@ exactly what we want to hear about.
   accepted in any letter case and compared in lower case. Quotas also bound what one request
   may have to touch: at most 100,000 tasks in a workspace, so even removing a member who is
   assigned all of them stays well inside the timeouts.
-- **Errors never leak internals:** unexpected errors return a generic 500, and the
-  `Authorization` and `Cookie` headers are redacted from the logs.
+- **Errors never leak internals.** Unexpected errors are logged in full, and the client only
+  gets a generic `500 INTERNAL_ERROR`. Every error answer uses a code from one fixed list,
+  and is checked against the documented `Error` schema before it is sent: one that doesn't
+  fit becomes that generic `500`, never a body in another shape. Fastify's internal error
+  names (`FST_ERR_…`) are translated to our codes, the errors Fastify raises before it finds
+  a route (a malformed URL, an overlong id) get the same shape, and a "route not found"
+  message repeats the path but never the query string, which could hold a token.
+- **Logs never hold a secret.** The `Authorization` and `Cookie` headers are redacted, and a
+  test records every log line at the most verbose level (`trace`) through a sign-up, a login,
+  a token refresh, an invitation, a failed login and a bad token, then checks that no
+  password or token appears anywhere. Each line of an authenticated request names the user's
+  id, and reusing a refresh token is logged as a warning, naming the user and the session
+  (never the token). A request id from upstream (`x-request-id`) is kept only if it looks
+  like an id (letters, digits and `-_.:`, at most 128 characters). Any client can send one,
+  so it's used to find log lines, never trusted for anything else.
+- **The API documentation is public on purpose.** `/docs` and the OpenAPI document describe
+  what any client learns by using the API, and hold no secrets or internal details. Its page
+  is served with a strict Content-Security-Policy: no inline scripts, and scripts only from
+  the API itself.
 - **The Docker images** (the API and the migration job) run as a non-root user, are pinned by
   digest and get the latest Alpine security fixes. Neither has npm, npx or yarn, and the API
   image has no development dependencies.

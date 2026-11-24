@@ -11,7 +11,7 @@ can rebuild it yourself without looking.
 | 3       | Professional quality: CI/CD, security scanning, NASA/JPL code rules | ✅     |
 | 4       | Workspaces, members, invitations and role-based permissions         | ✅     |
 | 5       | Projects and tasks: pagination, filtering, sorting                  | ✅     |
-| 6       | Error format, logging, OpenAPI docs                                 | ⏳     |
+| 6       | Consistent errors, logs and OpenAPI docs                            | ✅     |
 | 7       | Seed data and a recruiter-ready README                              | ⏳     |
 
 ---
@@ -2121,3 +2121,377 @@ vs exclusive lock · row lock (`FOR SHARE`, `FOR UPDATE`) · advisory lock · st
 fair queue · lock order · rolling deploy · isolation level (`READ COMMITTED`,
 `REPEATABLE READ`) · snapshot · NUL character · UTF-16 surrogate pair · canonical form ·
 mutation testing · flaky test
+
+## Chapter 6: Consistent errors, logs you can trust, and OpenAPI docs
+
+### What we built
+
+The API now describes itself. Start it with `npm run dev` and open
+<http://localhost:3000/docs>:
+
+```
+GET /docs        an interactive page: every route, what it accepts and answers ("Try it out" sends real requests)
+GET /docs/json   the OpenAPI document itself
+GET /docs/yaml   the same, in YAML
+```
+
+The same document is committed as `openapi.json`, so a change to the API shows up in code
+review.
+
+Errors became stricter. Every error answer now uses a code from one list, and Fastify
+checks each error body against that list before sending it:
+
+| Situation                               | Before                                | Now                          |
+| --------------------------------------- | ------------------------------------- | ---------------------------- |
+| A body that isn't JSON                  | `400 FST_ERR_CTP_INVALID_JSON_BODY`   | `400 INVALID_JSON`           |
+| An empty body sent as JSON              | `400 FST_ERR_CTP_EMPTY_JSON_BODY`     | `400 INVALID_JSON`           |
+| A body over 64 KB                       | `413 FST_ERR_CTP_BODY_TOO_LARGE`      | `413 PAYLOAD_TOO_LARGE`      |
+| A content type other than JSON          | `415 FST_ERR_CTP_INVALID_MEDIA_TYPE`  | `415 UNSUPPORTED_MEDIA_TYPE` |
+| A URL that isn't valid percent-encoding | `400` in Fastify's own format         | `400 BAD_REQUEST`            |
+| `GET /nope?token=…`                     | `404`, the message repeating `?token` | `404`, the path only         |
+| No token, and a broken body             | `400` (the body was read first)       | `401 UNAUTHORIZED`           |
+
+And the logs say more, and never too much:
+
+```json
+{"level":30,"reqId":"lb-7f3a.42:1","userId":"3f0c…","res":{"statusCode":200},"msg":"request completed"}
+{"level":40,"reqId":"9b1e…","userId":"3f0c…","familyId":"77a2…","msg":"refresh token reused: session revoked"}
+```
+
+### New files
+
+```
+src/plugins/openapi.ts     # builds the OpenAPI document, serves /docs
+src/lib/responses.ts       # errorResponses(): the error answers a route documents
+src/config/version.ts      # the API version, read from package.json
+openapi.json               # the document, committed (`npm run openapi` writes it)
+test/openapi.test.ts       # valid OpenAPI, same as openapi.json, every route documented, 401s
+test/logging.test.ts       # no secrets in the logs, user ids, request ids, reuse warnings
+```
+
+Every routes file now starts with a `schemas` object: what each route accepts and answers,
+and its documentation.
+
+### Concept 1: An error code is a promise
+
+Clients write `switch (body.error.code)`. Once a code is out, changing it breaks them, so
+codes are part of the API, like URLs. The message is for people and may change.
+
+So the codes are one list, `ERROR_CODES` in `src/lib/errors.ts`, and the `Error` schema
+only accepts those: `code: z.enum(ERROR_CODES)`. That one list does three jobs:
+
+- TypeScript refuses `new AppError(404, 'NOT_FUOND', …)`.
+- The OpenAPI document lists every code a client can ever see.
+- Fastify checks every error answer against the schema before sending it (Concept 3), so
+  not even a plugin can slip another code through.
+
+Before this chapter, the errors Fastify raises itself went out with Fastify's internal
+names, like `FST_ERR_CTP_INVALID_JSON_BODY`. Those names belong to Fastify: an upgrade
+could rename them, and our clients would break without us changing a line. Now the error
+handler translates them:
+
+```ts
+function clientErrorCode(err: unknown, status: number): ErrorCode {
+  if (status === 413) return 'PAYLOAD_TOO_LARGE';
+  if (status === 415) return 'UNSUPPORTED_MEDIA_TYPE';
+  if (status === 429) return 'RATE_LIMITED';
+  const code = frameworkCodeOf(err);
+  return code !== undefined && INVALID_JSON_CODES.has(code) ? 'INVALID_JSON' : 'BAD_REQUEST';
+}
+```
+
+It goes by the HTTP status where it can, because HTTP doesn't change. It reads Fastify's
+code only to tell the two JSON errors apart from the other `400`s. Anything it doesn't know
+becomes `BAD_REQUEST`: an upgrade can make our answers vaguer, never break them.
+
+**Errors before routing.** A few errors happen before Fastify has even found the route: a
+URL that isn't valid percent-encoding (`/workspaces/%E0%A4%A`), or an id in the path
+longer than 100 characters (`414`, Fastify's `maxParamLength`). They skip the error handler and every hook, so Fastify used
+to answer them in its own format, without even an `x-request-id`. Its `frameworkErrors`
+option hands them to us instead (`answerFrameworkError()` in the error handler).
+
+**The standard alternative: Problem Details.** RFC 9457 defines a standard format for
+errors, `application/problem+json`:
+`{ "type": "https://example.com/errors/email-taken", "title": "…", "status": 409, "detail": "…" }`.
+Its `type` URL plays the role of our `code`. We kept the shape clients have used since
+chapter 2, which carries the same information; Exercise 1 switches to the standard.
+
+### Concept 2: Documentation generated from the code
+
+**OpenAPI** is the standard way to describe an HTTP API: one JSON (or YAML) document that
+lists every path, what each accepts and answers, and how to authenticate. Tools read it:
+Swagger UI turns it into the `/docs` page, Postman imports it, and generators write typed
+clients from it in most languages.
+
+Written by hand, such a document drifts: someone adds a field and forgets the docs. Ours is
+generated by `@fastify/swagger` from the same Zod schemas that check every request and
+answer. A field the API accepts is in the docs because it's the same object.
+
+Each route declares its contract in the `schemas` object at the top of its file:
+
+```ts
+const schemas = {
+  delete: {
+    tags: ['workspaces'], // its group on /docs
+    operationId: 'deleteWorkspace', // the function name in a generated client
+    summary: 'Delete a workspace',
+    description: 'For its owners. Its projects, tasks and invitations are deleted with it.',
+    params: WorkspaceParams,
+    response: { 204: z.null().describe('Deleted'), ...errorResponses(400, 401, 403, 404) },
+  },
+} satisfies Record<string, FastifySchema>;
+
+app.delete('/:workspaceId', { schema: schemas.delete }, async (request, reply) => { … });
+```
+
+`satisfies` checks the shape (a typo like `sumary` is an error) without widening the types,
+so the handler still knows exactly what `request.params` holds.
+
+**Named schemas.** `.meta({ id: 'Task' })` makes a schema a named _component_: the document
+defines `Task` once, under `components.schemas`, and every answer that contains a task
+points to it with `"$ref": "#/components/schemas/Task"`. Client generators turn components
+into named types.
+
+**Who needs a token.** The document says once, at the top, that every route needs a bearer
+token (`security: [{ bearerAuth: [] }]`). Public routes say otherwise with `security: []`.
+Swagger UI shows a padlock on the others and an **Authorize** button: paste an access token
+there, and "Try it out" sends it.
+
+**OpenAPI 3.1** describes data with plain JSON Schema (draft 2020-12). Version 3.0 used a
+dialect of its own, with differences like `nullable: true` instead of
+`"type": ["string", "null"]`. We generate 3.1.
+
+### Concept 3: Error answers are documented, and checked
+
+A route lists the errors its own logic can produce:
+
+```ts
+response: { 200: Project.describe('The project'), ...errorResponses(400, 401, 404) },
+```
+
+`errorResponses()` adds `default`: the errors any route can give (`413`, `415`, `500`…).
+Each status comes with a description and a typical example, so the docs show `NOT_FOUND`
+under `404` and `FORBIDDEN` under `403`. The examples are typed: one with a code that isn't
+in the list doesn't compile.
+
+These aren't only docs. Fastify serializes every answer with the schema for its status, so
+every error body is checked against the `Error` schema on its way out. An error with a code
+that isn't in the list, or without a message, becomes a `500` (logged as "response does not
+match its schema") instead of reaching a client in the wrong shape. Every test in the suite
+ran through these checks.
+
+### Concept 4: A committed copy of the document
+
+`openapi.json`, at the root of the repository, is the document exactly as `/docs/json`
+serves it. A test compares the two:
+
+```ts
+await expect(`${JSON.stringify(app.swagger(), null, 2)}\n`).toMatchFileSnapshot('../openapi.json');
+```
+
+Change a route, and this test fails until you run `npm run openapi` (which rewrites the
+file) and commit the result. Why keep a generated file? For the same reason as
+`package-lock.json`: it makes a change visible in review. A pull request that renames a
+field shows the rename in `openapi.json`, where a reviewer sees "this breaks clients" even
+when the code change looked innocent. Tools like `oasdiff` compare two versions and flag
+the breaking changes (Exercise 3).
+
+The same test file also checks that:
+
+- the document is valid OpenAPI 3.1, against the official schema
+  (`@seriousme/openapi-schema-validator`);
+- every route has an `operationId`, a summary, one group, a `default` answer, and a real
+  description for every answer;
+- every error example is a valid `Error`.
+
+### Concept 5: Check the token before reading the body
+
+Fastify handles a request in steps, and a hook can run at each one:
+
+```
+onRequest → preParsing → (body read) → preValidation → (validation) → preHandler → handler
+```
+
+`authenticate` used to be a `preHandler`, which runs after validation. So a stranger with
+no token who sent a broken body got `400 VALIDATION_ERROR`, with `details` explaining what
+the body should contain. The API answered questions from people it didn't know, and read
+up to 64 KB of their JSON for free.
+
+Now it's an `onRequest` hook, the very first step:
+
+```ts
+app.addHook('onRequest', app.authenticate);
+```
+
+Without a valid token, the answer is `401` before the body is even read. A test checks it
+for every protected route in the document: it sends broken JSON without a token, and
+expects `401`. Only a route that checks the token first can pass. The routes come from the
+document itself, so a new route is covered without anyone remembering to add it.
+
+### Concept 6: Logs that say who, and which request, but never a secret
+
+**Who.** Once the token checks out, `authenticate` adds the user's id to the request's
+logger:
+
+```ts
+if (canSetBindings(request.log)) request.log.setBindings({ userId: request.user.sub });
+```
+
+Every later line of that request carries it, the "request completed" line included,
+because a request and its reply share one logger. "Which user got these 500s?" becomes a
+search. Each request has its own logger, so the id never sticks to the next request's
+lines (a test checks that too). `setBindings` comes from pino, the logger Fastify uses, but
+Fastify's types don't list it: the small type guard `canSetBindings()` checks that it's
+there instead of assuming it.
+
+**Which request.** Every request gets an id, sent back in the `x-request-id` header. When a
+proxy or another service in front of the API already gave the request an id, we keep it:
+then one id follows the request through every service, and their logs line up. But a header
+is input like any other, so we only take it if it looks like an id:
+
+```ts
+const UPSTREAM_REQUEST_ID = /^[\w.:-]{1,128}$/;
+```
+
+Letters, digits and `- _ . :`, at most 128 characters (rule 3): enough for a UUID and most
+tracing ids, and nothing that could break a log line or a header. Anything else gets a fresh
+UUID. And since any client can send this header, the id is for finding log lines, never
+for trusting anything.
+
+**Suspicious events.** Reusing a refresh token means a copy may be in the wrong hands
+(chapter 2, Concept 5). That's now a warning, logged with the request's own logger (so it
+has the request id), naming the user and the session, never the token. It happens on both
+paths: a token sent again after it was used, and two requests using it at the same moment.
+One function, `endStolenSession()`, handles both, so they can't drift apart. The test for
+the second path holds the user's lock while two refreshes start, so both find the token
+unused and then queue for the lock: the race happens every time, not by luck.
+
+The log levels, as this project uses them:
+
+| Level            | When                                       | Example                                 |
+| ---------------- | ------------------------------------------ | --------------------------------------- |
+| `error`          | Something is broken: someone must look     | an unhandled error, the database down   |
+| `warn`           | Nothing is broken, but someone should look | a refresh token used twice              |
+| `info`           | The normal story of each request           | "incoming request", "request completed" |
+| `debug`, `trace` | Details for a developer, off in production |                                         |
+
+**Never a secret.** The `Authorization` and `Cookie` headers were already redacted. Now a
+test proves the logs hold no secrets: it records every line at the most verbose level
+(`trace`) while signing up, logging in, refreshing, inviting, failing a login and sending a
+bad token, then searches all of it for the password and every token. `buildApp()` takes a
+`logStream` so the test can read the lines:
+
+```ts
+const lines: string[] = [];
+app = await buildTestApp(
+  { LOG_LEVEL: 'trace' },
+  { logStream: { write: (line) => lines.push(line) } },
+);
+```
+
+If someone later logs request bodies "just to debug something", this test fails.
+
+### Concept 7: When a library gets it almost right
+
+Three things didn't come out right on their own. Each fix is a few lines, with a comment
+saying why, and the committed `openapi.json` shows the result:
+
+1. **Two copies of every named schema.** fastify-type-provider-zod writes each named schema
+   twice: `Task` as the API sends it and `TaskInput` as the API reads it, because a schema
+   that transforms its input reads one shape and produces another. Ours are only ever sent,
+   so 15 `…Input` schemas were clutter on `/docs`. `usedSchemasOnly()` keeps the schemas
+   that some route uses, directly or through another schema.
+2. **Examples dropped next to a `$ref`.** OpenAPI 3.0 ignored anything written next to a
+   `$ref`, and @fastify/swagger deletes it, even in 3.1. So the example of each error
+   answer, which Zod writes next to `"$ref": "#/components/schemas/Error"`, vanished, and
+   the docs showed `VALIDATION_ERROR` under every status. `exampleBesideSchema()` moves the
+   example into the answer's `content`, where OpenAPI keeps examples anyway.
+3. **`/workspaces/` instead of `/workspaces`.** A route `/` in a plugin with the prefix
+   `/workspaces` answers both with and without the slash, and the docs listed the one with
+   it. `routerOptions: { ignoreTrailingSlash: true }` makes Fastify register a single
+   route, which answers both.
+
+They were found by reading the generated document and looking at the page, not only by
+checking that they exist. The fixes came from reading the libraries' code in
+`node_modules`: the answer to "why does it do that?" is usually twenty lines away.
+
+### Concept 8: The Power of Ten rules in this chapter
+
+- **Rule 2 (every loop has a bound):** `usedSchemasOnly()` follows references in rounds:
+  at most one round per schema, and it stops as soon as a round finds nothing new. The test
+  helper that waits for a lock gives up after 100 tries.
+- **Rule 3 (everything has a bound):** a request id from upstream is at most 128
+  characters, an id in the path at most 100 (`414` above), and a body at most 64 KB (`413`).
+- **Rule 5 (assertions):** every answer is checked against its schema before it's sent. An
+  answer that doesn't fit becomes a `500` and a log line, never a malformed body.
+- **Rule 8 (no escape hatches):** this chapter needed one type assertion, `as S` in
+  `usedSchemasOnly()`, because `Object.fromEntries()` forgets the type of the values. Its
+  comment says why it's safe: the values are the same objects, minus the unused ones.
+
+### How we know the tests work
+
+As in chapter 5, each new test was run against the bug it's meant to catch:
+
+| Bug put in on purpose                                 | Caught by                                       |
+| ----------------------------------------------------- | ----------------------------------------------- |
+| `authenticate` back in `preHandler` (one routes file) | the "401 without a token, before the body" test |
+| `security: []` missing on the login route             | the same test, and the `openapi.json` test      |
+| Fastify's JSON errors not translated                  | the `INVALID_JSON` test                         |
+| No `frameworkErrors`                                  | the "errors from before routing" test           |
+| The not-found message repeating the query string      | the unknown route test                          |
+| An `AppError` with a code that isn't in the list      | 13 workspace tests (`500` instead of `404`)     |
+| An example with a code that isn't in the list         | the examples test                               |
+| Examples left next to the `$ref`                      | the examples test, and the `openapi.json` test  |
+| The `…Input` copies kept                              | the `openapi.json` test                         |
+| No `ignoreTrailingSlash`                              | the `openapi.json` test                         |
+| No `setBindings`                                      | the "which user" test                           |
+| Any `x-request-id` accepted                           | the `requestIdFor()` tests                      |
+| Request bodies logged                                 | the "no password or token" test                 |
+| No warning when two requests use one refresh token    | the "same moment" test                          |
+
+### Build it yourself
+
+1. Register `@fastify/swagger` with `jsonSchemaTransform` and open `/docs/json`. Read what
+   it generates for one route before adding anything.
+2. Add `tags`, `summary` and `operationId` to one route, and `security: []` to a public
+   one. Watch its padlock disappear on `/docs`.
+3. Name `Task` with `.meta({ id: 'Task' })` and find its `TaskInput` copy in the document.
+   Then write `usedSchemasOnly()`.
+4. Write `errorResponses()` and give one route its error answers. Make an `AppError` use a
+   code that isn't in the list (with `as` to get it past TypeScript), and watch the tests
+   get a `500`.
+5. Commit the document with `toMatchFileSnapshot()`, change a route's summary, and watch
+   the test fail until you run `npm run openapi`.
+6. Move `authenticate` from `preHandler` to `onRequest` in one file, after writing the test
+   that sends broken JSON without a token. Watch it fail first.
+7. Record the logs in a test, add a `preHandler` that logs `request.body`, and watch the
+   secrets test fail.
+
+### Exercises
+
+1. **Problem Details.** Switch the error format to RFC 9457 (`application/problem+json`,
+   with `type`, `title`, `status` and `detail`). What happens to clients that switch on
+   `error.code`? How would you roll it out without breaking them? (Hint: the `Accept`
+   header, or a new version of the API.)
+2. **A typed client.** Generate TypeScript types from `openapi.json` with
+   `openapi-typescript`, and write a small script with `openapi-fetch` that logs in and
+   lists your workspaces. Rename a field in a response schema, regenerate: what does the
+   compiler say about your script?
+3. **Breaking changes in CI.** Add a job that compares the pull request's `openapi.json`
+   with `main`'s using `oasdiff breaking`, and fails on a breaking change unless the pull
+   request has a `breaking-change` label.
+4. **Which codes, exactly?** The docs list the statuses of each route, but not which codes
+   each can produce (a `404` can be `NOT_FOUND` or `INVITATION_NOT_FOUND`). Document them
+   per route. Could a test check that a route never answers a code it doesn't list?
+5. **Follow a request into the database.** Postgres can show which request a slow query
+   belongs to if the query carries the request id, in `application_name` or in a SQL
+   comment. How would you pass `request.id` down to Prisma, and what would it cost?
+6. **Docs behind a switch.** Some teams hide `/docs` in production. Add a `DOCS_ENABLED`
+   setting. Is hiding the docs a real defense? What does the API reveal anyway?
+
+### Words to know
+
+error code catalog · RFC 9457 Problem Details · framework errors · OpenAPI · Swagger UI ·
+component and `$ref` · `operationId` · security scheme (bearer) · snapshot test ·
+breaking change · request lifecycle and hooks (`onRequest`, `preHandler`) · log bindings ·
+request id (correlation id) · log levels · log redaction · Content-Security-Policy

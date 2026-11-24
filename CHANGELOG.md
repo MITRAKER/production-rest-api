@@ -28,6 +28,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sorting (by creation, last update or due date, with undated tasks last). New quotas limit
   projects per workspace (20 by default) and tasks per project (5,000), and together they
   may not allow more than 100,000 tasks in one workspace.
+- API documentation: an OpenAPI 3.1 document generated from the route schemas, served at
+  `/docs/json` with an interactive page at `/docs`, and committed as `openapi.json` so that
+  every change to the API shows in code review. Every route has a name, a summary, a group
+  and a description of each answer it can give, with an example of each error.
+- A catalog of error codes. Every error answer uses a code from one list, and is checked
+  against the documented `Error` schema before it is sent. The errors Fastify raises itself
+  get our codes (`INVALID_JSON`, `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`,
+  `BAD_REQUEST`) instead of its internal names, including those it raises before it finds a
+  route.
+- Logs: each line of an authenticated request names the user, reusing a refresh token logs a
+  warning, and an `x-request-id` from a proxy is kept when it looks like an id, so one id
+  follows a request through every service.
 - Quality gates: the strictest TypeScript settings, ESLint with the NASA/JPL "Power of Ten"
   rules (including a custom rule that bans recursion), Prettier, Git hooks (Husky,
   lint-staged, commitlint) and a test coverage threshold.
@@ -58,6 +70,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is never stored, and accounts created before this rule must still be able to log in.
 - Ids from clients are checked only for their shape and lower-cased, so ids written in
   capitals work everywhere, including the next page of a list and leaving a workspace.
+- Routes that need a token check it before reading the request body: without a valid token
+  the answer is `401`, never a validation error that describes the expected body.
+- A "route not found" message repeats the path but never the query string, which could hold
+  a token, and the errors Fastify raises before routing get an `x-request-id` like every other
+  answer.
+- A test checks that no password or token reaches the logs, even at the `trace` level.
 - Both Docker images are pinned by digest, run on Node.js 26 LTS as a non-root user and get
   the latest Alpine security fixes. Neither ships npm, and the API image leaves out the
   Prisma CLI.

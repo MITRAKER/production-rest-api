@@ -77,8 +77,8 @@ function answerOtherError(err: unknown, request: FastifyRequest, reply: FastifyR
 
 /**
  * Fastify answers a few errors before it has even found the route: a URL
- * that isn't valid percent-encoding (400), or a path segment longer than
- * maxParamLength (414). Those skip the error handler and every hook, so
+ * that isn't valid percent-encoding (400), or a path parameter (an id) longer
+ * than maxParamLength (414). Those skip the error handler and every hook, so
  * buildApp gives this to Fastify as its `frameworkErrors` option.
  */
 export function answerFrameworkError(
