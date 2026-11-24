@@ -282,6 +282,11 @@ starts.
 - **Prefer additive changes.** While a new version is being deployed, the old one may still be
   running against the new schema. To rename or drop a column, add the new column in one release
   and remove the old one in a later release.
+- **Change a lock in two releases, too.** A lock only protects a rule if every running version
+  takes it. If you replace one lock with another (a row lock with an advisory lock, say), the old
+  and new versions won't wait for each other while a deploy is under way. Take both locks in one
+  release and drop the old one in a later release, or stop the old version before the new one
+  starts.
 
 ## Releasing
 

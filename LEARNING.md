@@ -1867,6 +1867,16 @@ deadlock from chapter 4). Postgres also takes locks you didn't ask for: insertin
 checks its foreign keys with a light `FOR KEY SHARE` lock on the project row and on the
 users it references. Those come at the end, so they keep the order.
 
+**Every running copy of the API must take the same lock.** During a **rolling deploy**, the
+old version keeps serving requests next to the new one for a while, and the old version's
+row lock and the new advisory lock don't wait for each other. The third check (see "What
+the review found") showed what that allows: with the old code's SQL in one transaction and
+the new code in another, a task was assigned to a member who was being removed, and a
+workspace was left with no owner. It can't happen here, because no release of the API ever had
+the row locks: both are under `[Unreleased]` in the changelog. If one had, the switch would
+take two releases, like renaming a column: first take both locks, then drop the old one.
+CONTRIBUTING.md now says so.
+
 ### Concept 12: The Power of Ten rules in this chapter
 
 **Rule 3: everything has a bound.**
@@ -1906,12 +1916,13 @@ travel as one object (`ProjectRef`, `TaskRef`), straight from Fastify's `request
 existence and range. `test/input-bounds.test.ts` now covers the project and task schemas
 too (a `date` string has a fixed length, like a `uuid`).
 
-Every string a client sends now also refuses the **NUL character** (`U+0000`, `%00` in a
-URL). It's valid JSON and valid Unicode, but Postgres text can't hold it, so a title or a
-search with one failed in the database: a `500`. The review found it in every text field,
-including the workspace and user names of earlier chapters. Input schemas now start from
-`Text` (`src/lib/text.ts`) instead of `z.string()`, and `input-bounds.test.ts` sends a NUL
-to every free-text field of every input schema and expects the `400`.
+Every string a client sends that we store or search now also refuses the **NUL character**
+(`U+0000`, `%00` in a URL). It's valid JSON and valid Unicode, but Postgres text can't hold
+it, so a title or a search with one failed in the database: a `500`. The review found it in
+every text field, including the workspace and user names of earlier chapters. Input schemas
+now start from `Text` (`src/lib/text.ts`) instead of `z.string()`, and `input-bounds.test.ts`
+sends a NUL to every free-text field of every input schema (all but one, see below) and
+expects the `400`.
 
 The second review found two more things about strings:
 
@@ -1937,6 +1948,12 @@ when a client writes uuids in capitals (some do, like Swift's `uuidString`): pag
 list failed with `INVALID_CURSOR`, and a member leaving the workspace got a `403`. Turning
 every input into one **canonical form** at the edge means no comparison inside has to
 think about it.
+
+A third check found one id that still got two answers. `z.uuid()` checks a uuid's version
+and variant digits, and makes an exception for the max uuid (`ffffffff-…`), but only in lower
+case: in capitals it was a `400`, in lower case a `404`. `Id` now checks only the shape
+Postgres reads, 8-4-4-4-12 hex digits in either case (`z.guid()`), so every spelling of an
+id gets the same answer.
 
 ### What the review found
 
@@ -1984,6 +2001,18 @@ traffic, requests that queue for one task while already holding the shared lock,
 their shared locks always overlap. **A test that passes only shows that this one way of
 trying found nothing.**
 
+A third check, just before merging, went over those fixes and this chapter once more, and
+found three smaller things:
+
+| Found                          | What could happen                                                          | Fix                                                                    |
+| ------------------------------ | -------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| The max uuid in capitals       | `FFFFFFFF-…` got a `400`, `ffffffff-…` a `404`: one id, two answers        | `Id` checks only the shape, with `z.guid()` (Concept 12)               |
+| Old and new locks side by side | In a rolling deploy, the old and new versions wouldn't wait for each other | None needed: no release had the row locks (Concept 11)                 |
+| Docs that said too much        | "Every string refuses NUL", "every change to a workspace takes its lock"   | Reworded: the login password and revoking an invitation are exceptions |
+
+Revoking an invitation needs no lock: it's a single conditional update, and if it races a
+role change, the result is the same as if it had come just before it.
+
 ### How we know the tests work
 
 A test proves only what it checks. So each important test was run against the bug it's
@@ -2008,6 +2037,7 @@ meant to catch: we put the bug in on purpose, ran the test, and took the bug out
 | Ids not lower-cased                                           | the tests with ids in capitals              |
 | `Text` accepting half of a surrogate pair                     | the input tests (`201` instead of `400`)    |
 | The login password refusing the NUL character                 | the login test with an old password         |
+| `Id` built on `z.uuid()` again                                | the test with the max uuid in capitals      |
 
 This is called **mutation testing**: change the code in a small, wrong way (a "mutant")
 and check that some test fails. A mutant that survives points at a missing test. The query
@@ -2082,5 +2112,6 @@ index condition vs filter · backward index scan · `NULLS FIRST` / `NULLS LAST`
 cursor · base64url · allow-list vs block-list · `LIKE` wildcards and escaping · calendar date
 vs timestamp · `PATCH` semantics (missing vs `null`) · ownership-based permission · shared
 vs exclusive lock · row lock (`FOR SHARE`, `FOR UPDATE`) · advisory lock · starvation and
-fair queue · lock order · isolation level (`READ COMMITTED`, `REPEATABLE READ`) · snapshot ·
-NUL character · UTF-16 surrogate pair · canonical form · mutation testing · flaky test
+fair queue · lock order · rolling deploy · isolation level (`READ COMMITTED`,
+`REPEATABLE READ`) · snapshot · NUL character · UTF-16 surrogate pair · canonical form ·
+mutation testing · flaky test
