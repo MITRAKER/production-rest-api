@@ -2276,6 +2276,13 @@ token (`security: [{ bearerAuth: [] }]`). Public routes say otherwise with `secu
 Swagger UI shows a padlock on the others and an **Authorize** button: paste an access token
 there, and "Try it out" sends it.
 
+**A page that can't be turned against its readers.** `/docs` is served with a
+`Content-Security-Policy` header (`staticCSP: true`). It tells the browser to run only
+scripts that come from the API itself, never inline ones, so even text slipped into a
+description could not run as code. The policy is strict enough that the browser also
+refuses an inline `<style>` that Swagger UI adds to color its own logo: the console says
+so, and it's harmless.
+
 **OpenAPI 3.1** describes data with plain JSON Schema (draft 2020-12). Version 3.0 used a
 dialect of its own, with differences like `nullable: true` instead of
 `"type": ["string", "null"]`. We generate 3.1.
@@ -2402,8 +2409,9 @@ for trusting anything.
 has the request id), naming the user and the session, never the token. It happens on both
 paths: a token sent again after it was used, and two requests using it at the same moment.
 One function, `endStolenSession()`, handles both, so they can't drift apart. The test for
-the second path holds the user's lock while two refreshes start, so both find the token
-unused and then queue for the lock: the race happens every time, not by luck.
+the second path takes the user's lock first, and only then starts two refreshes: both find
+the token unused, then queue for the lock. The race happens every time, not by luck (the
+review found an earlier version that only won it most of the time).
 
 The log levels, as this project uses them:
 
@@ -2496,6 +2504,9 @@ As in chapter 5, each new test was run against the bug it's meant to catch:
 | No `setBindings`                                                 | the "which user" test                          |
 | Any `x-request-id` accepted                                      | the `requestIdFor()` tests                     |
 | Request bodies logged                                            | the "no password or token" test                |
+| The refresh token added to the reuse warning                     | the reuse warning test                         |
+| The user id bound before the token is verified                   | the "which user" test (a forged token)         |
+| `_` refused in a request id                                      | the `requestIdFor()` tests                     |
 | No warning when two requests use one refresh token               | the "same moment" test                         |
 
 ¹ `users.routes.ts`: its one route, `GET /users/me`, has nothing to read or validate, so the
@@ -2508,18 +2519,23 @@ question: is the code right, is every sentence of the docs true, and do the test
 they say? Each one ran things rather than only reading, and every finding was reproduced
 before it was fixed:
 
-| Found                                        | What could happen                                                                                                        | Fix                                                       |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| Error answers checked only by Fastify        | An `AppError` with a code that isn't in the list reached the client as `500 FST_ERR_FAILED_ERROR_SERIALIZATION`          | `sendError()` checks every error answer (Concept 3)       |
-| The `401` test used valid ids and no query   | A `GET` route that validated its input before the token passed it, and told strangers what a request should contain      | The test sends invalid ids and `?limit=0` too (Concept 5) |
-| Fastify's message for a malformed URL        | The `400` repeated the whole URL, query string included                                                                  | Our own message, with the path only (Concept 1)           |
-| Fastify also reads `text/plain`              | A text body got `400 VALIDATION_ERROR`, not the `415` the docs promised                                                  | The API reads JSON only (Concept 1)                       |
-| Plugin errors coded by Fastify's code        | A `403` from `@fastify/static` came as `BAD_REQUEST`, which the README listed only under `400` and `414`                 | Codes go by status (Concept 1)                            |
-| The HTTP server answers some requests itself | Unreadable requests, headers over 16 KB, slow requests and requests during a shutdown get Fastify's shape, no request id | The README and `/docs` name these exceptions (Exercise 7) |
+| Found                                        | What could happen                                                                                                        | Fix                                                              |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| Error answers checked only by Fastify        | An `AppError` with a code that isn't in the list reached the client as `500 FST_ERR_FAILED_ERROR_SERIALIZATION`          | `sendError()` checks every error answer (Concept 3)              |
+| The `401` test used valid ids and no query   | A `GET` route that validated its input before the token passed it, and told strangers what a request should contain      | The test sends invalid ids and `?limit=0` too (Concept 5)        |
+| Fastify's message for a malformed URL        | The `400` repeated the whole URL, query string included                                                                  | Our own message, with the path only (Concept 1)                  |
+| Fastify also reads `text/plain`              | A text body got `400 VALIDATION_ERROR`, not the `415` the docs promised                                                  | The API reads JSON only (Concept 1)                              |
+| Plugin errors coded by Fastify's code        | A `403` from `@fastify/static` came as `BAD_REQUEST`, which the README listed only under `400` and `414`                 | Codes go by status (Concept 1)                                   |
+| The HTTP server answers some requests itself | Unreadable requests, headers over 16 KB, slow requests and requests during a shutdown get Fastify's shape, no request id | The README and `/docs` name these exceptions (Exercise 7)        |
+| The race test sent its requests too soon     | Now and then a refresh took the lock before the test did: a timeout in 2 runs out of 48, and the lock left held          | Refreshes start once the lock is held, and it is always released |
+| The reuse warning test checked fields only   | A warning that also held the refresh token passed                                                                        | It checks that the token is nowhere in the logs                  |
 
-It also found sentences that said a little more than the truth: "each line of a request
-names the user" (not the first one, "incoming request", logged before the token is
-checked); "nobody can find out which emails have an account" in the login route's
+The tests review also found smaller gaps, each shown with a bug the tests let through: no
+test sent a forged token to check that it names no one in the logs, no test used `_` in a
+request id, and the Content-Security-Policy was checked on a script instead of the page.
+And the docs review found sentences that said a little more than the truth: "each line of
+a request names the user" (not the first one, "incoming request", logged before the token
+is checked); "nobody can find out which emails have an account" in the login route's
 description (signing up tells, with `EMAIL_TAKEN`); two "Build it yourself" steps that
 didn't work as written; and Rule 8 counting one type assertion where there were two.
 
@@ -2528,6 +2544,12 @@ The first row is the lesson. That very bug had been put in on purpose (the table
 `404` and got `500`. Nobody looked at the body of that `500`. A test that checks the whole
 answer, not only its status, would have shown Fastify's shape at once. When a test is about
 what a client receives, check all of what it receives.
+
+The race test is chapter 5's lesson again: a test that fails now and then is a bug report
+about the test. It started the lock-holding transaction and the two refreshes at the same
+moment, and the lock usually went to the transaction, because it asked first. Run 48
+times, it failed twice. "Usually first" is a race of its own; waiting for the lock
+(`await lockTaken`) is not. Run 50 times since, it never failed.
 
 ### Build it yourself
 

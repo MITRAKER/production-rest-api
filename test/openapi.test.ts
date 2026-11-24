@@ -92,6 +92,7 @@ describe('the OpenAPI document', () => {
     const page = await app.inject({ method: 'GET', url: '/docs' });
     expect(page.statusCode).toBe(200);
     expect(page.headers['content-type']).toContain('text/html');
+    expect(page.headers['content-security-policy']).toContain("script-src 'self'");
     const assets = await app.inject({ method: 'GET', url: '/docs/static/swagger-initializer.js' });
     expect(assets.headers['content-security-policy']).toContain("script-src 'self'");
   });

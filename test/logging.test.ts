@@ -36,9 +36,12 @@ function linesOf(res: { headers: Record<string, unknown> }) {
   return logs().filter((line) => line.reqId === res.headers['x-request-id']);
 }
 
-/** Waits until `count` queries are waiting for a lock (at most about 5 seconds). */
+/**
+ * Waits until `count` queries are waiting for a lock: at most about 3
+ * seconds, so that its own error shows before Vitest's 5-second test timeout.
+ */
 async function waitForLockWaiters(count: number) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
     const [row] = await app.prisma.$queryRaw<{ waiting: number }[]>`
       SELECT count(*)::int AS waiting FROM pg_stat_activity
       WHERE datname = current_database() AND wait_event_type = 'Lock'`;
@@ -94,12 +97,17 @@ describe('logs', () => {
     const { accessToken, user } = await registerUser(app);
     const mine = await client(app, accessToken).get('/users/me');
     const anonymous = await app.inject({ method: 'GET', url: '/health/live' });
+    // A token that doesn't verify names no one: whoever sent it chose what it says.
+    const forged = await client(app, `${accessToken}x`).get('/users/me');
 
     const completed = (res: typeof mine) =>
       linesOf(res).find((line) => line.msg === 'request completed');
     expect(completed(mine)).toMatchObject({ userId: user.id });
     // Each request has its own logger: the user id doesn't stick to later requests.
     expect(completed(anonymous)).not.toHaveProperty('userId');
+    expect(forged.statusCode).toBe(401);
+    expect(completed(forged)).toBeDefined();
+    expect(completed(forged)).not.toHaveProperty('userId');
   });
 
   it('warn when a refresh token is used twice, naming the session but not the token', async () => {
@@ -118,6 +126,7 @@ describe('logs', () => {
         familyId: expect.any(String),
       }),
     ]);
+    expect(lines.join('')).not.toContain(refreshToken);
   });
 
   it('warn too when two requests use one refresh token at the same moment', async () => {
@@ -132,17 +141,28 @@ describe('logs', () => {
     const released = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let locked: () => void = () => undefined;
+    const lockTaken = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
     const held = app.prisma.$transaction(
       async (tx) => {
         await lockUser(tx, user.id);
+        locked();
         await released;
       },
       { timeout: 10_000 },
     );
+    // Only once the lock is ours: a refresh sent sooner could take it first.
+    await lockTaken;
     const results = Promise.all([refresh(), refresh()]);
-    await waitForLockWaiters(2);
-    release();
-    await held;
+    try {
+      await waitForLockWaiters(2);
+    } finally {
+      // Even if the test fails: a lock left held would block the next tests.
+      release();
+      await held;
+    }
 
     const statuses = (await results).map((res) => res.statusCode);
     expect(statuses.toSorted((a, b) => a - b)).toEqual([200, 401]);
@@ -167,8 +187,9 @@ describe('requestIdFor()', () => {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
   it('keeps an id from upstream made of letters, digits and - _ . :', () => {
-    const id = 'f81d4fae-7dec-11d0-a765-00a0c91e6bf6';
-    expect(requestIdFor({ headers: { 'x-request-id': id } })).toBe(id);
+    for (const id of ['f81d4fae-7dec-11d0-a765-00a0c91e6bf6', 'Lb_7f3a.42:1-x']) {
+      expect(requestIdFor({ headers: { 'x-request-id': id } })).toBe(id);
+    }
   });
 
   it('makes a fresh id when there is none, or it looks like anything else', () => {
