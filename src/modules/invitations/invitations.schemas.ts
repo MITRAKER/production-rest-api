@@ -18,19 +18,25 @@ export const AcceptInvitationBody = z.object({
   token: Text.min(1).max(200),
 });
 
-export const Invitation = z.object({
-  id: z.uuid(),
-  email: z.string(),
-  role: Role,
-  invitedById: z.uuid().nullable(),
-  expiresAt: z.date(),
-  createdAt: z.date(),
-});
+export const Invitation = z
+  .object({
+    id: z.uuid(),
+    email: z.string(),
+    role: Role.describe('The role the invitee gets when they accept'),
+    invitedById: z.uuid().nullable(),
+    expiresAt: z.date(),
+    createdAt: z.date(),
+  })
+  .meta({ id: 'Invitation', description: 'An invitation that is still pending' });
 
 /** The token is returned exactly once, at creation, like an API key. */
-export const CreatedInvitation = z.object({
-  invitation: Invitation,
-  token: z.string(),
-});
+export const CreatedInvitation = z
+  .object({
+    invitation: Invitation,
+    token: z.string().describe('Shown only this once: send it to the invitee'),
+  })
+  .meta({ id: 'CreatedInvitation' });
 
-export const InvitationList = z.object({ data: z.array(Invitation) });
+export const InvitationList = z
+  .object({ data: z.array(Invitation) })
+  .meta({ id: 'InvitationList' });

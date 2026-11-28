@@ -1,3 +1,70 @@
+import { z } from 'zod';
+
+/**
+ * Every error code the API answers with. A code is part of the API: clients
+ * switch on it, so once released it never changes. The message is for
+ * people and may change wording.
+ *
+ * The OpenAPI document lists these codes (the Error schema), and the error
+ * handler checks every error answer against that schema before it's sent:
+ * one with a code that isn't in this list becomes a generic 500.
+ */
+export const ERROR_CODES = [
+  // 400: the request itself is wrong
+  'VALIDATION_ERROR',
+  'INVALID_JSON',
+  'BAD_REQUEST',
+  'INVALID_CURSOR',
+  'ASSIGNEE_NOT_MEMBER',
+  // 401: we don't know who you are
+  'UNAUTHORIZED',
+  'INVALID_CREDENTIALS',
+  'INVALID_REFRESH_TOKEN',
+  // 403: we know, and you may not do this
+  'FORBIDDEN',
+  'INVITATION_EMAIL_MISMATCH',
+  // 404 and 410: it isn't there, or not any more
+  'NOT_FOUND',
+  'INVITATION_NOT_FOUND',
+  'INVITATION_EXPIRED',
+  // 409: it conflicts with what's already there
+  'EMAIL_TAKEN',
+  'LAST_OWNER',
+  'ALREADY_MEMBER',
+  'INVITATION_PENDING',
+  'LIMIT_REACHED',
+  // 413, 415 and 429: limits of the HTTP layer
+  'PAYLOAD_TOO_LARGE',
+  'UNSUPPORTED_MEDIA_TYPE',
+  'RATE_LIMITED',
+  // 500: our fault
+  'INTERNAL_ERROR',
+] as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[number];
+
+/** What is wrong with one field, in a VALIDATION_ERROR. */
+const FieldError = z.object({
+  path: z
+    .string()
+    .describe('Where the problem is, as a JSON Pointer: "/email", or "/" for the whole input'),
+  message: z.string(),
+});
+
+/** The body of every error response: `{ "error": { "code", "message", "details"? } }`. */
+export const ErrorResponse = z
+  .object({
+    error: z.object({
+      code: z.enum(ERROR_CODES).describe('What went wrong, for programs: switch on this'),
+      message: z.string().describe('What went wrong, for people: the wording may change'),
+      details: z
+        .array(FieldError)
+        .optional()
+        .describe('Only for VALIDATION_ERROR: one entry per problem'),
+    }),
+  })
+  .meta({ id: 'Error', description: 'The body of every error answer' });
+
 /**
  * An error we throw on purpose, with an HTTP status and a stable,
  * machine-readable code. Clients should switch on `code`, never on `message`
@@ -6,9 +73,8 @@
 export class AppError extends Error {
   constructor(
     public readonly statusCode: number,
-    public readonly code: string,
+    public readonly code: ErrorCode,
     message: string,
-    public readonly details?: unknown,
   ) {
     super(message);
     this.name = 'AppError';

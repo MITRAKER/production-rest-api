@@ -37,22 +37,31 @@ export const RefreshBody = z.object({
   refreshToken: Text.min(1).max(200),
 });
 
-export const PublicUser = z.object({
-  id: z.uuid(),
-  email: z.string(),
-  name: z.string(),
-  createdAt: z.date(),
-});
+// The named schemas below (.meta id) are the ones an API client sees: they
+// appear by name in the OpenAPI document (see src/plugins/openapi.ts).
+export const PublicUser = z
+  .object({
+    id: z.uuid(),
+    email: z.string(),
+    name: z.string(),
+    createdAt: z.date(),
+  })
+  .meta({ id: 'User', description: 'A user (never with their password hash)' });
 
-export const AuthResponse = z.object({
-  user: PublicUser,
-  accessToken: z.string(),
-  refreshToken: z.string(),
-  tokenType: z.literal('Bearer'),
-  expiresIn: z.string(),
-});
+export const AuthResponse = z
+  .object({
+    user: PublicUser,
+    accessToken: z.string().describe('Send it as `Authorization: Bearer <accessToken>`'),
+    refreshToken: z.string().describe('Trade it for new tokens at POST /auth/refresh, once'),
+    tokenType: z.literal('Bearer'),
+    expiresIn: z.string().describe('How long the access token lasts, such as "15m"'),
+  })
+  .meta({ id: 'AuthResponse', description: 'A user, and the tokens of their new session' });
 
-export const TokenResponse = AuthResponse.omit({ user: true });
+export const TokenResponse = AuthResponse.omit({ user: true }).meta({
+  id: 'TokenResponse',
+  description: 'New tokens for the same session',
+});
 
 export type RegisterInput = z.infer<typeof RegisterBody>;
 export type LoginInput = z.infer<typeof LoginBody>;

@@ -63,22 +63,24 @@ export const TaskListQuery = PageQuery.extend({
   { message: 'dueFrom must be on or before dueTo', path: ['dueFrom'] },
 );
 
-export const Task = z.object({
-  id: z.uuid(),
-  workspaceId: z.uuid(),
-  projectId: z.uuid(),
-  title: z.string(),
-  description: z.string(),
-  status: TaskStatus,
-  priority: TaskPriority,
-  dueDate: z.iso.date().nullable(),
-  assigneeId: z.uuid().nullable(),
-  createdById: z.uuid().nullable(),
-  createdAt: z.date(),
-  updatedAt: z.date(),
-});
+export const Task = z
+  .object({
+    id: z.uuid(),
+    workspaceId: z.uuid(),
+    projectId: z.uuid(),
+    title: z.string(),
+    description: z.string(),
+    status: TaskStatus,
+    priority: TaskPriority,
+    dueDate: z.iso.date().nullable(),
+    assigneeId: z.uuid().nullable(),
+    createdById: z.uuid().nullable().describe('Who created it; null if that account is gone'),
+    createdAt: z.date(),
+    updatedAt: z.date(),
+  })
+  .meta({ id: 'Task' });
 
-export const TaskPage = pageOf(Task);
+export const TaskPage = pageOf(Task).meta({ id: 'TaskPage' });
 
 export type CreateTaskBody = z.infer<typeof CreateTaskBody>;
 export type UpdateTaskBody = z.infer<typeof UpdateTaskBody>;

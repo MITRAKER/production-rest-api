@@ -36,7 +36,13 @@ export type PageQuery = z.infer<typeof PageQuery>;
 
 /** The shape of every paginated response: one page of items, and where the next one starts. */
 export function pageOf<T extends z.ZodType>(item: T) {
-  return z.object({ data: z.array(item), nextCursor: z.string().nullable() });
+  return z.object({
+    data: z.array(item),
+    nextCursor: z
+      .string()
+      .nullable()
+      .describe('Send it back as `cursor` to get the next page; null on the last page'),
+  });
 }
 
 const CursorSchema = z.object({

@@ -13,9 +13,25 @@ declare module '@fastify/jwt' {
 
 declare module 'fastify' {
   interface FastifyInstance {
-    /** Use as a preHandler on any route that requires a logged-in user. */
+    /**
+     * Use as an onRequest hook on every route that requires a logged-in user:
+     * then a request without a valid token is refused before its body is
+     * even read, and its answer never depends on what the body holds.
+     */
     authenticate: (request: FastifyRequest) => Promise<void>;
   }
+}
+
+/**
+ * Fastify's logger is pino, whose loggers can add fields to all their later
+ * lines (setBindings). Fastify's types don't list that method, so check.
+ * A request and its reply share one logger: the "request completed" line
+ * gets the fields too.
+ */
+function canSetBindings(
+  log: object,
+): log is { setBindings: (bindings: Record<string, string>) => void } {
+  return 'setBindings' in log && typeof log.setBindings === 'function';
 }
 
 export default fp<{ secret: string; accessTtl: string }>(
@@ -33,6 +49,8 @@ export default fp<{ secret: string; accessTtl: string }>(
       } catch {
         throw Errors.unauthorized();
       }
+      // From now on, every log line of this request says who sent it.
+      if (canSetBindings(request.log)) request.log.setBindings({ userId: request.user.sub });
     });
   },
   { name: 'auth' },

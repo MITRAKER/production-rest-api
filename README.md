@@ -27,6 +27,7 @@ and tasks.
 | Auth          | JWT access tokens, rotating refresh tokens, argon2id, rate limiting                |
 | Authorization | Role-based (owner / admin / member), with database locks protecting the invariants |
 | API design    | Nested resources, keyset (cursor) pagination, allow-listed filters and sorts       |
+| API docs      | OpenAPI 3.1 generated from the Zod schemas, Swagger UI at `/docs`                  |
 | Testing       | Vitest against a real Postgres, with a coverage threshold                          |
 | Code quality  | ESLint with the NASA/JPL "Power of Ten" rules, Prettier, commitlint, Husky         |
 | Security      | CodeQL, dependency review, npm audit, Trivy, OpenSSF Scorecard, Dependabot         |
@@ -41,7 +42,7 @@ cp .env.example .env
 docker compose up -d db      # start Postgres (also creates the api_test database)
 npm install                  # also installs the Git hooks
 npm run db:migrate           # create the tables
-npm run dev                  # http://localhost:3000/health/ready
+npm run dev                  # API docs at http://localhost:3000/docs
 npm run check                # everything CI checks: format, lint, types, tests
 ```
 
@@ -60,13 +61,21 @@ Or run everything in containers: `docker compose up --build`.
 | `npm run typecheck`           | Type-check without building                                  |
 | `npm run build` / `npm start` | Compile and run the production build                         |
 | `npm run db:migrate`          | Create and apply a migration in development                  |
+| `npm run openapi`             | Rewrite `openapi.json` after changing a route                |
 
 ## Endpoints
+
+The full reference is generated from the code. Start the API and open
+[`localhost:3000/docs`](http://localhost:3000/docs): every route, what it accepts, what it
+answers and why, with an **Authorize** button and "Try it out" to send real requests. The
+OpenAPI 3.1 document behind that page is served at `/docs/json` and committed as
+[`openapi.json`](./openapi.json), ready for Postman or a client generator. An overview:
 
 | Method               | Path                                                         | Description                                              |
 | -------------------- | ------------------------------------------------------------ | -------------------------------------------------------- |
 | GET                  | `/health/live`                                               | Liveness probe (process is up)                           |
 | GET                  | `/health/ready`                                              | Readiness probe (database reachable)                     |
+| GET                  | `/docs`, `/docs/json`                                        | API documentation, and the OpenAPI document behind it    |
 | POST                 | `/auth/register`                                             | Create an account, returns access + refresh tokens       |
 | POST                 | `/auth/login`                                                | Log in, returns access + refresh tokens                  |
 | POST                 | `/auth/refresh`                                              | Exchange a refresh token for a new pair (rotation)       |
@@ -85,8 +94,10 @@ Or run everything in containers: `docker compose up --build`.
 | POST / GET           | `/workspaces/:workspaceId/projects/:projectId/tasks`         | Create a task (member), list with filters and sorting    |
 | GET / PATCH / DELETE | `/workspaces/:workspaceId/projects/:projectId/tasks/:taskId` | Read, edit (member), delete (its creator or admin+)      |
 
-Everything except `/health/*` and `/auth/*` requires `Authorization: Bearer <accessToken>`.
-Non-members get `404` for a workspace's routes, and members without the needed role get `403`.
+Everything except `/health/*`, `/auth/*` and `/docs` requires
+`Authorization: Bearer <accessToken>`, and without a valid one the answer is `401` before the
+request body is even read. Non-members get `404` for a workspace's routes, and members without
+the needed role get `403`.
 
 Project and task lists come one page at a time: `?limit=` sets the page size (20 by default,
 at most 100), and the response's `nextCursor` gets the next page (`&cursor=…`) until it is
@@ -95,8 +106,52 @@ range (`dueFrom`, `dueTo`) and title text (`q`), and sorted by `createdAt`, `upd
 `dueDate` (`order=asc` or `desc`). [LEARNING.md](./LEARNING.md) chapter 5 explains how it
 works.
 
-Errors always use one shape:
-`{ "error": { "code": "EMAIL_TAKEN", "message": "...", "details": [...] } }`.
+## Errors
+
+Every error answer has the same shape:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request validation failed",
+    "details": [{ "path": "/email", "message": "Invalid email address" }]
+  }
+}
+```
+
+Programs switch on `code`: a code never changes once released. The `message` is for people,
+and its wording may change. `details` comes only with `VALIDATION_ERROR`, one entry per
+problem. Every code, by status:
+
+| Status | Codes                                                                                      |
+| ------ | ------------------------------------------------------------------------------------------ |
+| 400    | `VALIDATION_ERROR`, `INVALID_JSON`, `INVALID_CURSOR`, `ASSIGNEE_NOT_MEMBER`, `BAD_REQUEST` |
+| 401    | `UNAUTHORIZED`, `INVALID_CREDENTIALS`, `INVALID_REFRESH_TOKEN`                             |
+| 403    | `FORBIDDEN`, `INVITATION_EMAIL_MISMATCH`                                                   |
+| 404    | `NOT_FOUND`, `INVITATION_NOT_FOUND`                                                        |
+| 409    | `EMAIL_TAKEN`, `LAST_OWNER`, `ALREADY_MEMBER`, `INVITATION_PENDING`, `LIMIT_REACHED`       |
+| 410    | `INVITATION_EXPIRED`                                                                       |
+| 413    | `PAYLOAD_TOO_LARGE` (a body over 64 KB)                                                    |
+| 414    | `BAD_REQUEST` (an id in the path longer than 100 characters)                               |
+| 415    | `UNSUPPORTED_MEDIA_TYPE` (a body that isn't JSON, even `text/plain`)                       |
+| 429    | `RATE_LIMITED` (too many login, sign-up or refresh attempts)                               |
+| 500    | `INTERNAL_ERROR`, with a generic message: the details only go to the logs                  |
+
+`BAD_REQUEST` covers any other client error, with the status that fits (a URL that isn't valid
+gets `400`). `/docs` lists the statuses each route can answer, with an example of each.
+
+Two kinds of answers have another shape. The readiness probe's `503` is
+`{ "status": "error", "database": "down" }`, for load balancers. And the HTTP server itself
+answers a few requests that never reach the API, in Fastify's shape
+(`{ "statusCode", "error", "message" }`, with no `code`): one it can't read (`400`), headers
+over 16 KB (`431`), a request that takes over 30 seconds to arrive (`408`), and one that
+arrives while the server shuts down (`503`).
+
+Every answer from the API carries an `x-request-id` header. Quote it in a bug report: it finds
+that request's lines in the logs. A proxy in front of the API can send its own `x-request-id`, and
+the API keeps it if it looks like an id (letters, digits and `-_.:`, at most 128 characters),
+so one id follows the request through every service.
 
 ## Quality and security
 
@@ -118,7 +173,7 @@ resource limits, short functions, assertions, and zero warnings.
 - [x] Professional quality: CI/CD, security scanning, NASA/JPL coding rules
 - [x] Workspaces, invitations and role-based access control
 - [x] Projects and tasks with pagination, filtering, sorting
-- [ ] Consistent errors, OpenAPI docs
+- [x] Consistent errors, logs and OpenAPI docs
 - [ ] Seed data and a recruiter-ready README
 
 ## License
